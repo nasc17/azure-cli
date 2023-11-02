@@ -88,6 +88,13 @@ def firewall_rule_create_func(cmd, client, resource_group_name, server_name, fir
             logger.warning('Configuring server firewall rule to accept connections from \'%s\' to \'%s\'...', start_ip_address,
                            end_ip_address)
 
+    if firewall_rule_name == 'allowall':
+        start_ip_address = '0.0.0.0'
+        end_ip_address = '255.255.255.255'
+        now = datetime.now()
+        firewall_rule_name = 'AllowAll_{}-{}-{}_{}-{}-{}'.format(now.year, now.month, now.day, now.hour, now.minute, now.second)
+        logger.warning('Configuring server firewall rule to accept connections from \'%s\' to \'%s\'...', start_ip_address, end_ip_address)
+
     parameters = {
         'name': firewall_rule_name,
         'start_ip_address': start_ip_address,
