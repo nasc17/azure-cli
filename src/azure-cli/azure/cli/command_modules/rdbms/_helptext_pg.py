@@ -413,6 +413,10 @@ examples:
       Create a firewall rule allowing connections to all Azure services
     text: >
       az postgres flexible-server firewall-rule create --resource-group testGroup --name testserver --rule-name allowazureservices --start-ip-address 0.0.0.0
+  - name: >
+      Create a firewall rule allowing connections to all IP addresses. This may be insecure.
+    text: >
+      az postgres flexible-server firewall-rule create --resource-group testGroup --name testserver --rule-name allowall --start-ip-address 0.0.0.0
 """
 
 helps['postgres flexible-server firewall-rule list'] = """
