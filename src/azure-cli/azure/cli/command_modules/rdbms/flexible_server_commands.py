@@ -23,7 +23,8 @@ from azure.cli.command_modules.rdbms._client_factory import (
     cf_postgres_flexible_private_link_resources,
     cf_postgres_flexible_virtual_endpoints,
     cf_postgres_flexible_server_threat_protection_settings,
-    cf_postgres_flexible_server_log_files)
+    cf_postgres_flexible_server_log_files,
+    cf_postgres_flexible_tuning_options)
 
 from ._transformers import (
     table_transform_output,
@@ -61,7 +62,7 @@ def load_flexibleserver_command_table(self, _):
     )
 
     postgres_flexible_location_capabilities_sdk = CliCommandType(
-        operations_tmpl='azure.mgmt.rdbms..postgresql_flexibleservers.operations#LocationBasedCapabilitiesOperations.{}',
+        operations_tmpl='azure.mgmt.postgresqlflexibleservers.operations#LocationBasedCapabilitiesOperations.{}',
         client_factory=cf_postgres_flexible_location_capabilities
     )
 
@@ -123,6 +124,11 @@ def load_flexibleserver_command_table(self, _):
     postgres_flexible_server_private_link_resources_sdk = CliCommandType(
         operations_tmpl='azure.mgmt.postgresqlflexibleservers.operations#PrivateLinkResourcesOperations.{}',
         client_factory=cf_postgres_flexible_private_link_resources
+    )
+
+    postgres_flexible_tuning_options_sdk = CliCommandType(
+        operations_tmpl='azure.mgmt.postgresqlflexibleservers.operations#TuningOptionsOperations.{}',
+        client_factory=cf_postgres_flexible_tuning_options
     )
 
     # MERU COMMANDS
@@ -288,3 +294,12 @@ def load_flexibleserver_command_table(self, _):
                             client_factory=cf_postgres_flexible_private_link_resources) as g:
         g.command('list', 'list_by_server')
         g.custom_show_command('show', 'flexible_server_private_link_resource_get', custom_command_type=flexible_servers_custom_postgres)
+
+    with self.command_group('postgres flexible-server', postgres_flexible_config_sdk,
+                            custom_command_type=flexible_servers_custom_postgres,
+                            client_factory=cf_postgres_flexible_config, table_transformer=table_transform_output_parameters) as g:
+        g.custom_command('update-index-tuning', 'index_tuning_update', custom_command_type=flexible_servers_custom_postgres)
+
+    with self.command_group('postgres flexible-server tuning-options', postgres_flexible_tuning_options_sdk,
+                            client_factory=cf_postgres_flexible_tuning_options) as g:
+        g.custom_command('show', 'tuning_options_get', custom_command_type=flexible_servers_custom_postgres)

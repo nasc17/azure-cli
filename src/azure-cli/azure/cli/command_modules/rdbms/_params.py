@@ -987,6 +987,17 @@ def load_arguments(self, _):    # pylint: disable=too-many-statements, too-many-
                 c.argument('resource_group_name', arg_type=resource_group_name_type)
                 c.argument('server_name', options_list=['--server-name', '-s'], id_part='name', arg_type=server_name_arg_type, required=False)
 
+        # index tuning
+        if command_group == 'postgres':
+            with self.argument_context('{} flexible-server update-index-tuning'.format(command_group)) as c:
+                c.argument('server_name', options_list=['--server-name', '-s'], arg_type=server_name_arg_type)
+                c.argument('state', options_list=['--state'], arg_type=get_enum_type(['Enabled', 'Disabled']),
+                           help='Whether index tuning is enabled.')
+                c.argument('yes', arg_type=yes_arg_type)
+
+            with self.argument_context('{} flexible-server tuning-options show'.format(command_group)) as c:
+                c.argument('server_name', options_list=['--server-name', '-s'], arg_type=server_name_arg_type)
+
         # GTID
         if command_group == 'mysql':
             with self.argument_context('{} flexible-server gtid reset'.format(command_group)) as c:

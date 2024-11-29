@@ -22,7 +22,7 @@ from azure.cli.core.util import CLIError, sdk_no_wait, user_confirmation
 from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
 from azure.mgmt.core.tools import resource_id, is_valid_resource_id, parse_resource_id
 from azure.cli.core.azclierror import BadRequestError, FileOperationError, MutuallyExclusiveArgumentError, RequiredArgumentMissingError, ArgumentUsageError, InvalidArgumentValueError
-from azure.mgmt.rdbms import postgresql_flexibleservers
+from azure.mgmt import postgresqlflexibleservers as postgresql_flexibleservers
 from ._client_factory import cf_postgres_flexible_firewall_rules, get_postgresql_flexible_management_client, \
     cf_postgres_flexible_db, cf_postgres_check_resource_availability, cf_postgres_flexible_servers, \
     cf_postgres_check_resource_availability_with_location, \
@@ -485,12 +485,50 @@ def flexible_parameter_update(client, server_name, configuration_name, resource_
         source = "user-override"
 
     parameters = postgresql_flexibleservers.models.Configuration(
-        configuration_name=configuration_name,
         value=value,
         source=source
     )
 
     return client.begin_update(resource_group_name, server_name, configuration_name, parameters)
+
+
+def index_tuning_update(cmd, client, resource_group_name, server_name, state):
+    validate_resource_group(resource_group_name)
+    source = "user-override"
+
+    if state == 'Enabled':
+        subscription = get_subscription_id(cmd.cli_ctx)
+        postgres_source_client = get_postgresql_flexible_management_client(cmd.cli_ctx, subscription)
+        source_server_object = postgres_source_client.servers.get(resource_group_name, server_name)
+        location = ''.join(source_server_object.location.lower().split())
+        list_location_capability_info = get_postgres_location_capability_info(cmd, location)
+        index_tuning_supported = list_location_capability_info['index_tuning_supported']
+        if not index_tuning_supported:
+            raise CLIError("Index tuning is not supported for the server.")
+
+        configuration_name = "index_tuning.mode"
+        value = "report"
+        _index_tuning_parameter_update(cmd, client, server_name, configuration_name, resource_group_name, source, value)
+        configuration_name = "pg_qs.query_capture_mode"
+        value = "all"
+        _index_tuning_parameter_update(cmd, client, server_name, configuration_name, resource_group_name, source, value)
+    else:
+        configuration_name = "index_tuning.mode"
+        parameters = postgresql_flexibleservers.models.Configuration(
+            value="off",
+            source=source
+        )
+        return client.begin_update(resource_group_name, server_name, configuration_name, parameters)
+
+
+def _index_tuning_parameter_update(cmd, client, server_name, configuration_name, resource_group_name, source, value):
+    parameters = postgresql_flexibleservers.models.Configuration(
+        value=value,
+        source=source
+    )
+
+    return resolve_poller(
+        client.begin_update(resource_group_name, server_name, configuration_name, parameters), cmd.cli_ctx, 'PostgreSQL Parameter update')
 
 
 def flexible_list_skus(cmd, client, location):
@@ -1425,6 +1463,16 @@ def flexible_server_private_link_resource_get(
         resource_group_name=resource_group_name,
         server_name=server_name,
         group_name="postgresqlServer")
+
+
+def tuning_options_get(client, resource_group_name, server_name):
+    validate_resource_group(resource_group_name)
+
+    return client.get(
+        resource_group_name=resource_group_name,
+        server_name=server_name,
+        tuning_option="index",
+    )
 
 
 def _update_private_endpoint_connection_status(cmd, client, resource_group_name, server_name,
