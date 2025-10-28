@@ -88,6 +88,7 @@ secondary_region_map = {
     "koreasouth": "koreacentral",
     "malaysiasouth": "japanwest",
     "northcentralus": "southcentralus",
+    "northeastus5": "centralus",
     "northeurope": "westeurope",
     "norwayeast": "norwaywest",
     "norwaywest": "norwayeast",
