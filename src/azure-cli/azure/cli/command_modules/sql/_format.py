@@ -27,7 +27,7 @@ def _bytes_to_friendly_string(b):
     unit = next(u for u in _units if (b % u[0]) == 0)
 
     # Format the value with the chosen unit
-    return str((b // unit[0])) + unit[1]
+    return str(b // unit[0]) + unit[1]
 
 
 class LongRunningOperationResultTransform(LongRunningOperation):  # pylint: disable=too-few-public-methods
@@ -35,7 +35,7 @@ class LongRunningOperationResultTransform(LongRunningOperation):  # pylint: disa
     Long-running operation poller that also transforms the json response.
     '''
     def __init__(self, cli_ctx, transform_func):
-        super(LongRunningOperationResultTransform, self).__init__(cli_ctx)
+        super().__init__(cli_ctx)
         self._transform_func = transform_func
 
     def __call__(self, result):
@@ -50,7 +50,7 @@ class LongRunningOperationResultTransform(LongRunningOperation):  # pylint: disa
         from azure.cli.core.util import poller_classes
         if isinstance(result, poller_classes()):
             # Poll for long-running operation result result by calling base class
-            result = super(LongRunningOperationResultTransform, self).__call__(result)
+            result = super().__call__(result)
 
         # Apply transform function
         return self._transform_func(result)
@@ -262,6 +262,39 @@ def elastic_pool_transform(result):
     result.dtu = result.sku.capacity if is_dtu else None
     result.database_dtu_min = int(result.per_database_settings.min_capacity) if is_dtu else None
     result.database_dtu_max = int(result.per_database_settings.max_capacity) if is_dtu else None
+
+    return result
+
+
+#####
+#           sql deleted-server transformers for json
+#####
+
+
+def deleted_server_list_transform(results):
+    '''
+    Transforms the json response for a list of deleted servers.
+    '''
+    return [deleted_server_transform(r) for r in results]
+
+
+def deleted_server_transform(result):
+    '''
+    Transforms the json response for a deleted server.
+    Parses original_id to extract subscription ID, resource group, and server name.
+    '''
+    if result.original_id:
+        try:
+            # Parse original_id format:
+            # /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.Sql/servers/{name}
+            parts = result.original_id.split('/')
+            if len(parts) >= 9:
+                result.subscription_id = parts[2]
+                result.resource_group = parts[4]
+                result.name = parts[8]
+        except (ValueError, IndexError):
+            # If parsing fails, just continue without adding the fields
+            pass
 
     return result
 

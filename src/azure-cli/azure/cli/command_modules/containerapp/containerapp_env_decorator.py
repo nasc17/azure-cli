@@ -3,7 +3,7 @@
 # Licensed under the MIT License. See License.txt in the project root for license information.
 # --------------------------------------------------------------------------------------------
 # pylint: disable=line-too-long, consider-using-f-string, logging-format-interpolation, inconsistent-return-statements, broad-except, bare-except, too-many-statements, too-many-locals, too-many-boolean-expressions, too-many-branches, too-many-nested-blocks, pointless-statement, expression-not-assigned, unbalanced-tuple-unpacking, unsupported-assignment-operation, too-many-public-methods, broad-exception-caught, expression-not-assigned, ungrouped-imports
-
+from copy import deepcopy
 from typing import Any, Dict
 from knack.log import get_logger
 
@@ -11,7 +11,7 @@ from azure.cli.command_modules.appservice.utils import _normalize_location
 from azure.cli.core.azclierror import RequiredArgumentMissingError, ValidationError
 from azure.cli.core.commands import AzCliCommand
 from knack.util import CLIError
-from msrestazure.tools import is_valid_resource_id
+from azure.mgmt.core.tools import is_valid_resource_id
 
 from ._constants import CONTAINER_APPS_RP
 from ._utils import (get_vnet_location,
@@ -68,9 +68,6 @@ class ContainerAppEnvDecorator(BaseResource):
 
     def get_argument_infrastructure_subnet_resource_id(self):
         return self.get_param("infrastructure_subnet_resource_id")
-
-    def get_argument_docker_bridge_cidr(self):
-        return self.get_param("docker_bridge_cidr")
 
     def get_argument_platform_reserved_cidr(self):
         return self.get_param("platform_reserved_cidr")
@@ -131,10 +128,13 @@ class ContainerAppEnvDecorator(BaseResource):
 class ContainerAppEnvCreateDecorator(ContainerAppEnvDecorator):
     def __init__(self, cmd: AzCliCommand, client: Any, raw_parameters: Dict, models: str):
         super().__init__(cmd, client, raw_parameters, models)
-        self.managed_env_def = ManagedEnvironmentModel
+        self.managed_env_def = deepcopy(ManagedEnvironmentModel)
 
     def get_argument_enable_workload_profiles(self):
         return self.get_param("enable_workload_profiles")
+
+    def get_argument_infrastructure_resource_group(self):
+        return self.get_param("infrastructure_resource_group")
 
     def validate_arguments(self):
         location = self.get_argument_location()
@@ -160,6 +160,15 @@ class ContainerAppEnvCreateDecorator(ContainerAppEnvDecorator):
         # validate mtls and p2p traffic encryption
         if self.get_argument_p2p_encryption_enabled() is False and self.get_argument_mtls_enabled() is True:
             raise ValidationError("Cannot use '--enable-mtls' with '--enable-peer-to-peer-encryption False'")
+
+        # Infrastructure Resource Group
+        if self.get_argument_infrastructure_resource_group() is not None:
+            if not self.get_argument_infrastructure_subnet_resource_id():
+                raise RequiredArgumentMissingError("Cannot use --infrastructure-resource-group/-i without "
+                                                   "--infrastructure-subnet-resource-id/-s")
+            if not self.get_argument_enable_workload_profiles():
+                raise RequiredArgumentMissingError("Cannot use --infrastructure-resource-group/-i without "
+                                                   "--enable-workload-profiles/-w")
 
     def create(self):
         try:
@@ -191,7 +200,7 @@ class ContainerAppEnvCreateDecorator(ContainerAppEnvDecorator):
 
         # Custom domains
         if self.get_argument_hostname():
-            custom_domain = CustomDomainConfigurationModel
+            custom_domain = deepcopy(CustomDomainConfigurationModel)
             blob, _ = load_cert_file(self.get_argument_certificate_file(), self.get_argument_certificate_password())
             custom_domain["dnsSuffix"] = self.get_argument_hostname()
             custom_domain["certificatePassword"] = self.get_argument_certificate_password()
@@ -209,17 +218,22 @@ class ContainerAppEnvCreateDecorator(ContainerAppEnvDecorator):
 
         self.set_up_peer_to_peer_encryption()
 
-    def set_up_workload_profiles(self):
-        if self.get_argument_enable_workload_profiles():
-            # If the environment exists, infer the environment type
-            existing_environment = None
-            try:
-                existing_environment = self.client.show(cmd=self.cmd,
-                                                        resource_group_name=self.get_argument_resource_group_name(),
-                                                        name=self.get_argument_name())
-            except Exception as e:
-                handle_non_404_status_code_exception(e)
+        self.set_up_infrastructure_resource_group()
 
+    def set_up_infrastructure_resource_group(self):
+        if self.get_argument_enable_workload_profiles() and self.get_argument_infrastructure_subnet_resource_id() is not None:
+            self.managed_env_def["properties"]["InfrastructureResourceGroup"] = self.get_argument_infrastructure_resource_group()
+
+    def set_up_workload_profiles(self):
+        # If the environment exists, infer the environment type
+        existing_environment = None
+        try:
+            existing_environment = self.client.show(cmd=self.cmd,
+                                                    resource_group_name=self.get_argument_resource_group_name(),
+                                                    name=self.get_argument_name())
+        except Exception as e:
+            handle_non_404_status_code_exception(e)
+        if self.get_argument_enable_workload_profiles():
             if existing_environment and safe_get(existing_environment, "properties", "workloadProfiles") is None:
                 # check if input params include -w/--enable-workload-profiles
                 if self.cmd.cli_ctx.data.get('safe_params') and ('-w' in self.cmd.cli_ctx.data.get(
@@ -229,6 +243,10 @@ class ContainerAppEnvCreateDecorator(ContainerAppEnvDecorator):
                 return
 
             self.managed_env_def["properties"]["workloadProfiles"] = get_default_workload_profiles(self.cmd, self.get_argument_location())
+        else:
+            if existing_environment and safe_get(existing_environment, "properties", "workloadProfiles") is not None:
+                raise ValidationError(
+                    f"Existing environment {self.get_argument_name()} uses workload profiles. If you want to use Consumption-Only environment, please create a new one.")
 
     def set_up_app_log_configuration(self):
         if (self.get_argument_logs_customer_id() is None or self.get_argument_logs_key() is None) and self.get_argument_logs_destination() == "log-analytics":
@@ -238,27 +256,24 @@ class ContainerAppEnvCreateDecorator(ContainerAppEnvDecorator):
             self.set_argument_logs_key(logs_key)
 
         if self.get_argument_logs_destination() == "log-analytics":
-            log_analytics_config_def = LogAnalyticsConfigurationModel
+            log_analytics_config_def = deepcopy(LogAnalyticsConfigurationModel)
             log_analytics_config_def["customerId"] = self.get_argument_logs_customer_id()
             log_analytics_config_def["sharedKey"] = self.get_argument_logs_key()
         else:
             log_analytics_config_def = None
 
-        app_logs_config_def = AppLogsConfigurationModel
+        app_logs_config_def = deepcopy(AppLogsConfigurationModel)
         app_logs_config_def["destination"] = self.get_argument_logs_destination() if self.get_argument_logs_destination() != "none" else None
         app_logs_config_def["logAnalyticsConfiguration"] = log_analytics_config_def
 
         self.managed_env_def["properties"]["appLogsConfiguration"] = app_logs_config_def
 
     def set_up_vnet_configuration(self):
-        if self.get_argument_infrastructure_subnet_resource_id() or self.get_argument_docker_bridge_cidr() or self.get_argument_platform_reserved_cidr() or self.get_argument_platform_reserved_dns_ip():
-            vnet_config_def = VnetConfigurationModel
+        if self.get_argument_infrastructure_subnet_resource_id() or self.get_argument_platform_reserved_cidr() or self.get_argument_platform_reserved_dns_ip():
+            vnet_config_def = deepcopy(VnetConfigurationModel)
 
             if self.get_argument_infrastructure_subnet_resource_id() is not None:
                 vnet_config_def["infrastructureSubnetId"] = self.get_argument_infrastructure_subnet_resource_id()
-
-            if self.get_argument_docker_bridge_cidr() is not None:
-                vnet_config_def["dockerBridgeCidr"] = self.get_argument_docker_bridge_cidr()
 
             if self.get_argument_platform_reserved_cidr() is not None:
                 vnet_config_def["platformReservedCidr"] = self.get_argument_platform_reserved_cidr()
@@ -315,6 +330,9 @@ class ContainerAppEnvUpdateDecorator(ContainerAppEnvDecorator):
 
         self.set_up_peer_to_peer_encryption()
 
+        # dapr
+        self.set_up_dapr()
+
     def set_up_app_log_configuration(self):
         logs_destination = self.get_argument_logs_destination()
 
@@ -347,10 +365,12 @@ class ContainerAppEnvUpdateDecorator(ContainerAppEnvDecorator):
         workload_profile_name = self.get_argument_workload_profile_name()
         workload_profile_type = self.get_argument_workload_profile_type()
 
+        workload_profile_name = workload_profile_type if workload_profile_name is None else workload_profile_name
+
         if workload_profile_name:
             if "workloadProfiles" not in r["properties"] or not r["properties"]["workloadProfiles"]:
                 raise ValidationError(
-                    "This environment does not allow for workload profiles. Can create a compatible environment with 'az containerapp env create --enable-workload-profiles'")
+                    "This environment does not allow for workload profiles. You can create a compatible environment with 'az containerapp env create --enable-workload-profiles'")
 
             if workload_profile_type:
                 workload_profile_type = workload_profile_type.upper()
@@ -377,6 +397,14 @@ class ContainerAppEnvUpdateDecorator(ContainerAppEnvDecorator):
                 workload_profiles[idx] = profile
 
             safe_set(self.managed_env_def, "properties", "workloadProfiles", value=workload_profiles)
+
+    def set_up_dapr(self):
+        dapr_connection_string = self.get_argument_dapr_connection_string()
+        if dapr_connection_string is not None:
+            if dapr_connection_string == "none":
+                safe_set(self.managed_env_def, "properties", "daprAIConnectionString", value=None)
+            else:
+                safe_set(self.managed_env_def, "properties", "daprAIConnectionString", value=dapr_connection_string)
 
     def update(self):
         try:

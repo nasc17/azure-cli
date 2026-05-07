@@ -6,10 +6,14 @@ import unittest
 from unittest import mock
 import os
 
-from msrestazure.azure_exceptions import CloudError
+from azure.core.exceptions import HttpResponseError
 
 from azure.mgmt.web import WebSiteManagementClient
 from knack.util import CLIError
+from azure.cli.core.azclierror import (InvalidArgumentValueError,
+                                       MutuallyExclusiveArgumentError,
+                                       AzureResponseError,
+                                       ArgumentUsageError)
 from azure.cli.command_modules.appservice.custom import (set_deployment_user,
                                                          update_git_token, add_hostname,
                                                          update_site_configs,
@@ -27,7 +31,11 @@ from azure.cli.command_modules.appservice.custom import (set_deployment_user,
                                                          list_snapshots,
                                                          restore_snapshot,
                                                          create_managed_ssl_cert,
-                                                         add_github_actions)
+                                                         add_github_actions,
+                                                         update_app_settings,
+                                                         update_application_settings_polling,
+                                                         update_webapp,
+                                                         create_webapp)
 
 # pylint: disable=line-too-long
 from azure.cli.core.profiles import ResourceType
@@ -266,8 +274,8 @@ class TestWebappMocked(unittest.TestCase):
     @mock.patch('azure.cli.command_modules.appservice.custom._generic_site_operation', autospec=True)
     def test_sync_repository_skip_bad_error(self, site_op_mock):
         resp = FakedResponse(200)  # because of bad spec, sdk throws on 200.
-        setattr(resp, 'text', '{"Message": ""}')
-        site_op_mock.side_effect = CloudError(resp, error="bad error")
+        setattr(resp, 'reason', 'bad error')
+        site_op_mock.side_effect = HttpResponseError(response=resp)
         # action
         sync_site_repo(mock.MagicMock(), 'myRG', 'myweb')
         # assert
@@ -352,7 +360,8 @@ class TestWebappMocked(unittest.TestCase):
         site_op_mock.assert_called_with(cli_ctx_mock, 'rg', 'web1', 'list_snapshots', None)
 
     @mock.patch('azure.cli.command_modules.appservice.custom.web_client_factory', autospec=True)
-    def test_restore_snapshot(self, client_factory_mock):
+    @mock.patch('azure.cli.command_modules.appservice.custom._generic_site_operation', autospec=True)
+    def test_restore_snapshot(self, generic_site_op_mock, client_factory_mock):
         cmd_mock = _get_test_cmd()
         cli_ctx_mock = mock.MagicMock()
         cli_ctx_mock.data = {'subscription_id': 'sub1'}
@@ -361,11 +370,22 @@ class TestWebappMocked(unittest.TestCase):
         client = mock.MagicMock()
         client.web_apps.restore_snapshot_slot = mock.MagicMock()
         client.web_apps.restore_snapshot = mock.MagicMock()
+
+        Site = cmd_mock.get_models('Site')
+        site = Site(name='src_web', location='location')
+        site.slot_name = 'src_slot'
+        site.resouce_group = 'src_rg'
+        site.id = '/subscriptions/sub1/resourceGroups/src_rg/providers/Microsoft.Web/sites/src_web/slots/src_slot'
+
+        generic_site_op_mock.return_value = site
+
         client_factory_mock.return_value = client
+        
+
 
         SnapshotRecoverySource, SnapshotRestoreRequest = \
             cmd_mock.get_models('SnapshotRecoverySource', 'SnapshotRestoreRequest')
-        source = SnapshotRecoverySource(id='/subscriptions/sub1/resourceGroups/src_rg/providers/Microsoft.Web/sites/src_web/slots/src_slot')
+        source = SnapshotRecoverySource(id='/subscriptions/sub1/resourceGroups/src_rg/providers/Microsoft.Web/sites/src_web/slots/src_slot', location='location')
         request = SnapshotRestoreRequest(overwrite=False, snapshot_time='2018-12-07T02:01:31.4708832Z',
                                          recovery_source=source, recover_configuration=False)
         overwrite_request = SnapshotRestoreRequest(overwrite=True, snapshot_time='2018-12-07T02:01:31.4708832Z', recover_configuration=True)
@@ -418,6 +438,36 @@ class TestWebappMocked(unittest.TestCase):
         self.assertFalse(validate_container_app_create_options(None, None, test_multi_container_config, None))
         self.assertFalse(validate_container_app_create_options(None, None, None, None))
 
+    @mock.patch('azure.cli.command_modules.appservice.custom.web_client_factory', autospec=True)
+    @mock.patch('azure.cli.command_modules.appservice.custom._StackRuntimeHelper', autospec=True)
+    @mock.patch('azure.cli.command_modules.appservice.custom.get_site_availability', autospec=True)
+    def test_linux_webapp_create_no_runtime_raises_error(self, get_site_avail_mock,
+                                                         stack_helper_mock, web_client_mock):
+        cmd_mock = _get_test_cmd()
+        SiteConfig, SkuDescription, NameValuePair = cmd_mock.get_models(
+            'SiteConfig', 'SkuDescription', 'NameValuePair')
+        cmd_mock.get_models = mock.MagicMock(return_value=(SiteConfig, SkuDescription, NameValuePair))
+
+        # Mock a Linux plan (reserved=True)
+        plan_info = mock.MagicMock()
+        plan_info.reserved = True
+        plan_info.location = 'eastus'
+        plan_info.id = '/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Web/serverfarms/plan'
+        plan_info.sku = SkuDescription(name='F1')
+        web_client_mock.return_value.app_service_plans.get.return_value = plan_info
+
+        # Mock site availability (new app name)
+        name_validation = mock.MagicMock()
+        name_validation.name_available = True
+        get_site_avail_mock.return_value = name_validation
+
+        with self.assertRaises(ArgumentUsageError) as context:
+            create_webapp(cmd_mock, 'test-rg', 'test-app', 'test-plan')
+
+        self.assertIn('Creating a Linux webapp requires one of the following', str(context.exception))
+        self.assertIn('--runtime', str(context.exception))
+        self.assertIn('--os-type linux', str(context.exception))
+
     @mock.patch('azure.cli.command_modules.appservice.custom._verify_hostname_binding', autospec=True)
     @mock.patch('azure.cli.command_modules.appservice.custom.web_client_factory', autospec=True)
     @mock.patch('azure.cli.command_modules.appservice.custom._generic_site_operation', autospec=True)
@@ -451,9 +501,206 @@ class TestWebappMocked(unittest.TestCase):
                                                                      certificate_envelope=cert_def)
 
 
-class FakedResponse(object):  # pylint: disable=too-few-public-methods
+    def test_update_app_settings_error_handling_no_parameters(self):
+        """Test that MutuallyExclusiveArgumentError is raised when neither settings nor slot_settings are provided."""
+        cmd_mock = _get_test_cmd()
+        
+        # Test missing both parameters - should fail early without calling any services
+        with self.assertRaisesRegex(MutuallyExclusiveArgumentError, 
+                                   "Please provide either --settings or --slot-settings parameter"):
+            update_app_settings(cmd_mock, 'test-rg', 'test-app')
+
+    @mock.patch('azure.cli.command_modules.appservice.custom._generic_site_operation')
+    @mock.patch('azure.cli.command_modules.appservice.custom.shell_safe_json_parse')
+    def test_update_app_settings_error_handling_invalid_format(self, mock_json_parse, mock_site_op):
+        """Test that InvalidArgumentValueError is raised for invalid setting formats."""
+        cmd_mock = _get_test_cmd()
+        
+        # Setup minimal mocks needed to reach the error handling code
+        mock_app_settings = mock.MagicMock()
+        mock_app_settings.properties = {}
+        mock_site_op.return_value = mock_app_settings
+        
+        # Mock shell_safe_json_parse to raise InvalidArgumentValueError (simulating invalid JSON)
+        mock_json_parse.side_effect = InvalidArgumentValueError("Invalid JSON format")
+        
+        # Test invalid format that can't be parsed as JSON or key=value
+        invalid_setting = "invalid_format_no_equals_no_json"
+        expected_message = r"Invalid setting format.*Expected 'key=value' format or valid JSON"
+        
+        with self.assertRaisesRegex(InvalidArgumentValueError, expected_message):
+            update_app_settings(cmd_mock, 'test-rg', 'test-app', settings=[invalid_setting])
+
+    @mock.patch('azure.cli.command_modules.appservice.custom._generic_site_operation')
+    @mock.patch('azure.cli.command_modules.appservice.custom.shell_safe_json_parse')
+    def test_update_app_settings_error_handling_invalid_format_no_equals(self, mock_json_parse, mock_site_op):
+        """Test ValueError path when shell_safe_json_parse raises InvalidArgumentValueError and string contains no '='."""
+        cmd_mock = _get_test_cmd()
+        
+        # Setup minimal mocks needed to reach the error handling code
+        mock_app_settings = mock.MagicMock()
+        mock_app_settings.properties = {}
+        mock_site_op.return_value = mock_app_settings
+        
+        # Mock shell_safe_json_parse to raise InvalidArgumentValueError
+        mock_json_parse.side_effect = InvalidArgumentValueError("Invalid JSON format")
+        
+        # Test invalid format with no equals sign - this should trigger ValueError in split('=', 1)
+        invalid_setting_no_equals = "invalidformatthatcontainsnoequalsign"
+        expected_message = r"Invalid setting format.*Expected 'key=value' format or valid JSON"
+        
+        with self.assertRaisesRegex(InvalidArgumentValueError, expected_message):
+            update_app_settings(cmd_mock, 'test-rg', 'test-app', settings=[invalid_setting_no_equals])
+
+    @mock.patch('azure.cli.command_modules.appservice.custom._generic_site_operation')
+    @mock.patch('azure.cli.command_modules.appservice.custom.web_client_factory')
+    @mock.patch('azure.cli.command_modules.appservice.custom.is_centauri_functionapp')
+    @mock.patch('azure.cli.command_modules.appservice.custom._generic_settings_operation')
+    @mock.patch('azure.cli.command_modules.appservice.custom._build_app_settings_output')
+    def test_update_app_settings_success_key_value_format(self, mock_build, mock_settings_op, mock_centauri, 
+                                                         mock_client_factory, mock_site_op):
+        """Test successful processing of key=value format settings."""
+        cmd_mock = _get_test_cmd()
+        
+        # Setup mocks
+        mock_app_settings = mock.MagicMock()
+        mock_app_settings.properties = {}
+        mock_site_op.return_value = mock_app_settings
+        
+        mock_client = mock.MagicMock()
+        mock_client_factory.return_value = mock_client
+        mock_centauri.return_value = False
+        mock_settings_op.return_value = mock_app_settings
+        mock_build.return_value = {"KEY1": "value1", "KEY2": "value2"}
+        
+        # Test valid key=value format
+        result = update_app_settings(cmd_mock, 'test-rg', 'test-app', 
+                                   settings=['KEY1=value1', 'KEY2=value2'])
+        
+        # Verify the function completed successfully
+        self.assertEqual(result["KEY1"], "value1")
+        self.assertEqual(result["KEY2"], "value2")
+        mock_build.assert_called_once()
+
+    @mock.patch('azure.cli.command_modules.appservice.custom.send_raw_request')
+    def test_update_application_settings_polling_error_handling(self, mock_send_request):
+        """Test that AzureResponseError is raised in polling function when appropriate."""
+        cmd_mock = _get_test_cmd()
+        
+        # Mock an exception that doesn't have the expected structure
+        class MockException(Exception):
+            def __init__(self):
+                self.response = mock.MagicMock()
+                self.response.status_code = 400  # Not 202
+                self.response.headers = {}
+        
+        # Mock _generic_settings_operation to raise the exception
+        with mock.patch('azure.cli.command_modules.appservice.custom._generic_settings_operation') as mock_settings_op, \
+             self.assertRaisesRegex(AzureResponseError, "Failed to update application settings"):
+            mock_settings_op.side_effect = MockException()
+            update_application_settings_polling(cmd_mock, 'test-rg', 'test-app', 
+                                               mock.MagicMock(), None, mock.MagicMock())
+
+    @mock.patch('azure.cli.command_modules.appservice.custom._generic_site_operation')
+    @mock.patch('azure.cli.command_modules.appservice.custom.web_client_factory')
+    @mock.patch('azure.cli.command_modules.appservice.custom.is_centauri_functionapp')
+    @mock.patch('azure.cli.command_modules.appservice.custom._generic_settings_operation')
+    @mock.patch('azure.cli.command_modules.appservice.custom._build_app_settings_output')
+    def test_update_app_settings_success_with_slot_settings(self, mock_build, mock_settings_op, mock_centauri,
+                                                           mock_client_factory, mock_site_op):
+        """Test successful processing with slot settings."""
+        cmd_mock = _get_test_cmd()
+        
+        # Setup mocks
+        mock_app_settings = mock.MagicMock()
+        mock_app_settings.properties = {}
+        mock_site_op.return_value = mock_app_settings
+        
+        mock_client = mock.MagicMock()
+        mock_slot_config = mock.MagicMock()
+        mock_slot_config.app_setting_names = []
+        mock_client.web_apps.list_slot_configuration_names.return_value = mock_slot_config
+        mock_client_factory.return_value = mock_client
+        mock_centauri.return_value = False
+        mock_settings_op.return_value = mock_app_settings
+        mock_build.return_value = {"SLOT_KEY": "slot_value"}
+        
+        # Test with slot settings
+        result = update_app_settings(cmd_mock, 'test-rg', 'test-app', 
+                                   settings=['REGULAR_KEY=regular_value'],
+                                   slot_settings=['SLOT_KEY=slot_value'])
+        
+        # Verify slot configuration was updated
+        mock_client.web_apps.list_slot_configuration_names.assert_called_once()
+        mock_client.web_apps.update_slot_configuration_names.assert_called_once()
+        mock_build.assert_called_once()
+
+
+class TestUpdateWebapp(unittest.TestCase):
+
+    def _create_site_instance(self, cmd):
+        Site = cmd.get_models('Site')
+        SiteConfig = cmd.get_models('SiteConfig')
+        site_config = SiteConfig(number_of_workers=1)
+        instance = Site(location='eastus', site_config=site_config)
+        instance.kind = 'app,linux'
+        return instance
+
+    def test_update_webapp_platform_release_channel_extended(self):
+        cmd_mock = _get_test_cmd()
+        instance = self._create_site_instance(cmd_mock)
+
+        result = update_webapp(cmd_mock, instance, platform_release_channel='Extended')
+
+        self.assertEqual(result.additional_properties["properties"]["platformReleaseChannel"], "Extended")
+
+    def test_update_webapp_platform_release_channel_standard(self):
+        cmd_mock = _get_test_cmd()
+        instance = self._create_site_instance(cmd_mock)
+
+        result = update_webapp(cmd_mock, instance, platform_release_channel='Standard')
+
+        self.assertEqual(result.additional_properties["properties"]["platformReleaseChannel"], "Standard")
+
+    def test_update_webapp_platform_release_channel_latest(self):
+        cmd_mock = _get_test_cmd()
+        instance = self._create_site_instance(cmd_mock)
+
+        result = update_webapp(cmd_mock, instance, platform_release_channel='Latest')
+
+        self.assertEqual(result.additional_properties["properties"]["platformReleaseChannel"], "Latest")
+
+
+class FakedResponse:  # pylint: disable=too-few-public-methods
     def __init__(self, status_code):
         self.status_code = status_code
+
+
+class TestCreateAppServicePlanDefaults(unittest.TestCase):
+    """Tests for create_app_service_plan default SKU behavior"""
+
+    @mock.patch('azure.cli.command_modules.appservice.custom.web_client_factory')
+    @mock.patch('azure.cli.command_modules.appservice.custom._get_location_from_resource_group', return_value='eastus')
+    def test_default_sku_is_p0v3_when_not_specified(self, mock_location, mock_client_factory):
+        from azure.cli.command_modules.appservice.custom import create_app_service_plan
+        mock_cmd = mock.MagicMock()
+        mock_cmd.get_models.return_value = (mock.MagicMock(), mock.MagicMock(), mock.MagicMock())
+        mock_cmd.cli_ctx = mock.MagicMock()
+        mock_client = mock.MagicMock()
+        mock_client_factory.return_value = mock_client
+
+        # Call without sku parameter — should default to P0V3
+        try:
+            create_app_service_plan(mock_cmd, 'rg', 'plan', is_linux=True, hyper_v=False)
+        except Exception:
+            pass  # We don't care about downstream errors, just checking the SKU
+
+        # Verify SkuDescription was called with P0V3 tier/name
+        sku_description_cls = mock_cmd.get_models.return_value[1]
+        sku_description_cls.assert_called()
+        call_kwargs = sku_description_cls.call_args
+        # The sku name should be normalized P0V3
+        self.assertIn('P0V3', str(call_kwargs))
 
 
 if __name__ == '__main__':

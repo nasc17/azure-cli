@@ -4,6 +4,7 @@
 # --------------------------------------------------------------------------------------------
 
 from azure.cli.core.util import CLIError
+from azure.cli.core.azclierror import InvalidArgumentValueError
 
 # Important note: if cmd validator exists, then individual param validators will not be
 # executed. See C:\git\azure-cli\env\lib\site-packages\knack\invocation.py `def _validation`
@@ -30,7 +31,7 @@ def create_args_for_complex_type(arg_ctx, dest, model_type, arguments):
             :return: The argument of specific type.
             '''
             ns = vars(namespace)
-            kwargs = dict((k, ns[k]) for k in ns if k in set(expanded_arguments))
+            kwargs = {k: ns[k] for k in ns if k in set(expanded_arguments)}
             setattr(namespace, assigned_arg, model_type(**kwargs))
 
         return _expansion_validator_impl
@@ -79,7 +80,7 @@ def create_args_for_complex_type(arg_ctx, dest, model_type, arguments):
 
 # Validates if a subnet id or name have been given by the user. If subnet id is given, vnet-name should not be provided.
 def validate_subnet(cmd, namespace):
-    from msrestazure.tools import resource_id, is_valid_resource_id
+    from azure.mgmt.core.tools import resource_id, is_valid_resource_id
     from azure.cli.core.commands.client_factory import get_subscription_id
 
     # Different custom function arg names, instance pool has subnet_id
@@ -138,3 +139,20 @@ def validate_managed_instance_storage_size(namespace):
         pass
     else:
         raise CLIError('incorrect usage: --storage must be specified in increments of 32 GB')
+
+
+###############################################
+#                sql server                   #
+###############################################
+
+
+def validate_soft_delete_retention_days(namespace):
+    '''
+    Validates that soft_delete_retention_days is within the allowed range of 0-7 days.
+    '''
+    if namespace.soft_delete_retention_days is not None:
+        value = namespace.soft_delete_retention_days
+        if not isinstance(value, int) or value < 0 or value > 7:
+            raise InvalidArgumentValueError(
+                'The value for --soft-delete-retention-days must be an integer between 0 and 7.',
+                'Specify 0 to disable soft delete, or 1-7 to set the retention period in days.')

@@ -13,6 +13,7 @@ from azure.cli.command_modules.acs._helpers import (
     check_is_private_cluster,
     check_is_private_link_cluster,
     format_parameter_name_to_option_name,
+    get_monitoring_addon_key,
     get_property_from_dict_or_object,
     get_snapshot,
     get_snapshot_by_snapshot_id,
@@ -38,7 +39,6 @@ from azure.cli.core.azclierror import (
 )
 from azure.cli.core.profiles import ResourceType
 from azure.core.exceptions import AzureError, HttpResponseError, ServiceRequestError, ServiceResponseError
-from msrestazure.azure_exceptions import CloudError
 
 
 class DecoratorFunctionsTestCase(unittest.TestCase):
@@ -126,16 +126,18 @@ class DecoratorFunctionsTestCase(unittest.TestCase):
 
         mc_1 = self.models.ManagedCluster(
             location="test_location",
-            api_server_access_profile=self.models.ManagedClusterAPIServerAccessProfile(),
+            api_server_access_profile=self.models.ManagedClusterAPIServerAccessProfile(
+                enable_vnet_integration=True,
+            ),
         )
-        mc_1.api_server_access_profile.additional_properties={'enableVnetIntegration': True}
         self.assertEqual(check_is_apiserver_vnet_integration_cluster(mc_1), True)
 
         mc_2 = self.models.ManagedCluster(
             location="test_location",
-            api_server_access_profile=self.models.ManagedClusterAPIServerAccessProfile(),
+            api_server_access_profile=self.models.ManagedClusterAPIServerAccessProfile(
+                enable_vnet_integration=False,
+            ),
         )
-        mc_2.api_server_access_profile.additional_properties={'enableVnetIntegration': False}
         self.assertEqual(check_is_apiserver_vnet_integration_cluster(mc_2), False)
 
         mc_3 = self.models.ManagedCluster(
@@ -172,9 +174,9 @@ class DecoratorFunctionsTestCase(unittest.TestCase):
             location="test_location",
             api_server_access_profile=self.models.ManagedClusterAPIServerAccessProfile(
                 enable_private_cluster=True,
+                enable_vnet_integration=True,
             ),
         )
-        mc_3.api_server_access_profile.additional_properties={'enableVnetIntegration': True}
         self.assertEqual(check_is_private_link_cluster(mc_3), False)
 
         mc_4 = self.models.ManagedCluster(
@@ -325,7 +327,7 @@ class GetUserAssignedIdentityTestCase(unittest.TestCase):
             )
             self.assertEqual(user_assigned_identity, mock_user_assigned_identity)
 
-        cloud_error_2 = CloudError(Mock(status_code="xxx"), "mock user assigned identity was not found")
+        cloud_error_2 = HttpResponseError(response=Mock(status_code="xxx", reason="mock user assigned identity was not found"))
         mock_user_assigned_identity_operations_2 = Mock(
             user_assigned_identities=Mock(get=Mock(side_effect=cloud_error_2))
         )
@@ -335,7 +337,7 @@ class GetUserAssignedIdentityTestCase(unittest.TestCase):
         ), self.assertRaises(ResourceNotFoundError):
             get_user_assigned_identity("mock_cli_ctx", "mock_sub_id", "mock_rg", "mock_identity_name")
 
-        cloud_error_3 = CloudError(Mock(status_code="xxx"), "test_error_msg")
+        cloud_error_3 = HttpResponseError(response=Mock(status_code="xxx", reason="test_error_msg"))
         mock_user_assigned_identity_operations_3 = Mock(
             user_assigned_identities=Mock(get=Mock(side_effect=cloud_error_3))
         )
@@ -344,6 +346,48 @@ class GetUserAssignedIdentityTestCase(unittest.TestCase):
             return_value=mock_user_assigned_identity_operations_3,
         ), self.assertRaises(ServiceError):
             get_user_assigned_identity("mock_cli_ctx", "mock_sub_id", "mock_rg", "mock_identity_name")
+
+
+class TestGetMonitoringAddonKey(unittest.TestCase):
+    """Tests for the shared get_monitoring_addon_key helper."""
+
+    def test_returns_default_when_addon_profiles_is_none(self):
+        result = get_monitoring_addon_key(None, "omsagent")
+        self.assertEqual(result, "omsagent")
+
+    def test_returns_lowercase_key_when_present(self):
+        addon_profiles = {"omsagent": object()}
+        result = get_monitoring_addon_key(addon_profiles, "omsagent")
+        self.assertEqual(result, "omsagent")
+
+    def test_normalizes_camelcase_key(self):
+        profile = object()
+        addon_profiles = {"omsAgent": profile}
+        result = get_monitoring_addon_key(addon_profiles, "omsagent")
+        self.assertEqual(result, "omsagent")
+        self.assertIn("omsagent", addon_profiles)
+        self.assertNotIn("omsAgent", addon_profiles)
+
+    def test_prefers_lowercase_when_both_present(self):
+        addon_profiles = {"omsagent": object(), "omsAgent": object()}
+        result = get_monitoring_addon_key(addon_profiles, "omsagent")
+        self.assertEqual(result, "omsagent")
+
+    def test_returns_default_when_key_not_present(self):
+        addon_profiles = {"someOtherAddon": object()}
+        result = get_monitoring_addon_key(addon_profiles, "omsagent")
+        self.assertEqual(result, "omsagent")
+
+    def test_normalizes_nonstandard_casing(self):
+        """A key like 'oMSaGent' should be re-keyed to the canonical form."""
+        profile = object()
+        addon_profiles = {"oMSaGent": profile}
+        result = get_monitoring_addon_key(addon_profiles, "omsagent")
+        self.assertEqual(result, "omsagent")
+        # The dict should now contain the canonical key, not the old one.
+        self.assertIn("omsagent", addon_profiles)
+        self.assertNotIn("oMSaGent", addon_profiles)
+        self.assertIs(addon_profiles["omsagent"], profile)
 
 
 if __name__ == "__main__":

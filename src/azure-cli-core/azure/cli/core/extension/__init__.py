@@ -8,9 +8,8 @@ import os
 import traceback
 import json
 import re
-from distutils.sysconfig import get_python_lib  # pylint: disable=deprecated-module
+from sysconfig import get_path
 
-import pkginfo
 from knack.config import CLIConfig
 from knack.log import get_logger
 from azure.cli.core._config import GLOBAL_CONFIG_DIR, ENV_VAR_PREFIX
@@ -22,7 +21,7 @@ _CUSTOM_EXT_SYS_DIR = az_config.get('extension', 'sys_dir', None)
 EXTENSIONS_DIR = os.path.expanduser(_CUSTOM_EXT_DIR) if _CUSTOM_EXT_DIR else os.path.join(GLOBAL_CONFIG_DIR,
                                                                                           'cliextensions')
 DEV_EXTENSION_SOURCES = _DEV_EXTENSION_SOURCES.split(',') if _DEV_EXTENSION_SOURCES else []
-EXTENSIONS_SYS_DIR = os.path.expanduser(_CUSTOM_EXT_SYS_DIR) if _CUSTOM_EXT_SYS_DIR else os.path.join(get_python_lib(), 'azure-cli-extensions')
+EXTENSIONS_SYS_DIR = os.path.expanduser(_CUSTOM_EXT_SYS_DIR) if _CUSTOM_EXT_SYS_DIR else os.path.join(get_path("purelib"), 'azure-cli-extensions')
 
 EXTENSIONS_MOD_PREFIX = 'azext_'
 
@@ -51,7 +50,7 @@ logger = get_logger(__name__)
 
 class ExtensionNotInstalledException(Exception):
     def __init__(self, extension_name):
-        super(ExtensionNotInstalledException, self).__init__(extension_name)
+        super().__init__(extension_name)
         self.extension_name = extension_name
 
     def __str__(self):
@@ -127,13 +126,14 @@ class Extension:
 class WheelExtension(Extension):
 
     def __init__(self, name, path=None):
-        super(WheelExtension, self).__init__(name, 'whl', path)
+        super().__init__(name, 'whl', path)
 
     def get_version(self):
         return self.metadata.get('version')
 
     def get_metadata(self):
         from glob import glob
+        import pkginfo
 
         metadata = {}
         ext_dir = self.path or get_extension_path(self.name)
@@ -207,12 +207,14 @@ class WheelExtension(Extension):
 
 class DevExtension(Extension):
     def __init__(self, name, path):
-        super(DevExtension, self).__init__(name, 'dev', path)
+        super().__init__(name, 'dev', path)
 
     def get_version(self):
         return self.metadata.get('version')
 
     def get_metadata(self):
+        import pkginfo
+
         metadata = {}
         ext_dir = self.path
         if not ext_dir or not os.path.isdir(ext_dir):
@@ -378,5 +380,11 @@ def is_preview_from_semantic_version(version):
 
 def is_stable_from_metadata(item):
     return not (item["metadata"].get(EXT_METADATA_ISPREVIEW, False) or
+                item["metadata"].get(EXT_METADATA_ISEXPERIMENTAL, False) or
+                is_preview_from_semantic_version(item["metadata"]['version']))
+
+
+def is_preview_from_metadata(item):
+    return bool(item["metadata"].get(EXT_METADATA_ISPREVIEW, False) or
                 item["metadata"].get(EXT_METADATA_ISEXPERIMENTAL, False) or
                 is_preview_from_semantic_version(item["metadata"]['version']))

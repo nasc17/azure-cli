@@ -3,16 +3,14 @@
 # Licensed under the MIT License. See License.txt in the project root for license information.
 # --------------------------------------------------------------------------------------------
 
-import json
-
 from azure.cli.core.azclierror import (ResourceNotFoundError, ArgumentUsageError, InvalidArgumentValueError,
                                        MutuallyExclusiveArgumentError)
 from azure.cli.core.commands import LongRunningOperation
 from azure.cli.core.commands.client_factory import get_subscription_id
+from azure.mgmt.core.tools import is_valid_resource_id, resource_id, parse_resource_id
 from azure.mgmt.web.models import IpSecurityRestriction
 from importlib import import_module
 from knack.log import get_logger
-from msrestazure.tools import is_valid_resource_id, resource_id, parse_resource_id
 
 from ._appservice_utils import _generic_site_operation
 from .custom import get_site_configs
@@ -24,14 +22,14 @@ ALLOWED_HTTP_HEADER_NAMES = ['x-forwarded-host', 'x-forwarded-for', 'x-azure-fdi
 
 def show_webapp_access_restrictions(cmd, resource_group_name, name, slot=None):
     configs = get_site_configs(cmd, resource_group_name, name, slot)
-    access_restrictions = json.dumps(configs.ip_security_restrictions, default=lambda x: x.__dict__)
-    scm_access_restrictions = json.dumps(configs.scm_ip_security_restrictions, default=lambda x: x.__dict__)
+    access_restrictions = [r.serialize() for r in (configs.ip_security_restrictions or [])]
+    scm_access_restrictions = [r.serialize() for r in (configs.scm_ip_security_restrictions or [])]
     access_rules = {
         "scmIpSecurityRestrictionsUseMain": configs.scm_ip_security_restrictions_use_main,
         "ipSecurityRestrictionsDefaultAction": configs.ip_security_restrictions_default_action,
         "scmIpSecurityRestrictionsDefaultAction": configs.scm_ip_security_restrictions_default_action,
-        "ipSecurityRestrictions": json.loads(access_restrictions),
-        "scmIpSecurityRestrictions": json.loads(scm_access_restrictions)
+        "ipSecurityRestrictions": access_restrictions,
+        "scmIpSecurityRestrictions": scm_access_restrictions
     }
     return access_rules
 
@@ -41,12 +39,14 @@ def add_webapp_access_restriction(
         action='Allow', ip_address=None, subnet=None,
         vnet_name=None, description=None, scm_site=False,
         ignore_missing_vnet_service_endpoint=False, slot=None, vnet_resource_group=None,
-        service_tag=None, http_headers=None):
+        service_tag=None, http_headers=None, skip_service_tag_validation=None):
     configs = get_site_configs(cmd, resource_group_name, name, slot)
     if (int(service_tag is not None) + int(ip_address is not None) +
             int(subnet is not None) != 1):
         err_msg = 'Please specify either: --subnet or --ip-address or --service-tag'
         raise MutuallyExclusiveArgumentError(err_msg)
+    if skip_service_tag_validation is not None:
+        logger.warning('Skipping service tag validation.')
 
     # get rules list
     access_rules = configs.scm_ip_security_restrictions if scm_site else configs.ip_security_restrictions
@@ -89,13 +89,16 @@ def add_webapp_access_restriction(
 
 def remove_webapp_access_restriction(cmd, resource_group_name, name, rule_name=None, action='Allow',
                                      ip_address=None, subnet=None, vnet_name=None, scm_site=False, slot=None,
-                                     service_tag=None):
+                                     service_tag=None, skip_service_tag_validation=None):
     configs = get_site_configs(cmd, resource_group_name, name, slot)
     input_rule_types = (int(service_tag is not None) + int(ip_address is not None) +
                         int(subnet is not None))
     if input_rule_types > 1:
         err_msg = 'Please specify either: --subnet or --ip-address or --service-tag'
         raise MutuallyExclusiveArgumentError(err_msg)
+    if skip_service_tag_validation is not None:
+        logger.warning('Skipping service tag validation.')
+
     rule_instance = None
     # get rules list
     access_rules = configs.scm_ip_security_restrictions if scm_site else configs.ip_security_restrictions

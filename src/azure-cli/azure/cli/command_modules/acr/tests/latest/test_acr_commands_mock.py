@@ -3,16 +3,11 @@
 # Licensed under the MIT License. See License.txt in the project root for license information.
 # --------------------------------------------------------------------------------------------
 
-try:
-    from urllib.parse import urlencode
-except ImportError:
-    from urllib import urlencode
+from urllib.parse import urlencode
 import json
 import unittest
 from unittest import mock
 import sys
-
-from azure.mgmt.containerregistry.v2019_05_01.models import Registry, Sku
 
 from azure.cli.command_modules.acr.repository import (
     acr_repository_list,
@@ -49,11 +44,13 @@ from azure.cli.command_modules.acr._docker_utils import (
     get_access_credentials,
     get_authorization_header,
     get_manifest_authorization_header,
+    _resolve_acr_scope,
     RepoAccessTokenPermission,
     HelmAccessTokenPermission,
     EMPTY_GUID
 )
 from azure.cli.command_modules.acr._docker_utils import ResourceNotFound
+from azure.cli.command_modules.acr._constants import ACR_AUDIENCE_RESOURCE_NAME
 from azure.cli.core.mock import DummyCli
 
 
@@ -1195,6 +1192,8 @@ class AcrMockCommandsTests(unittest.TestCase):
                                    tenant_suffix=test_tenant_suffix)
 
     def _core_token_scenarios(self, mock_get_raw_token, mock_requests_get, mock_requests_post, mock_get_registry_by_name, registry_exists, registry_name, login_server, tenant_suffix):
+        from azure.mgmt.containerregistry.models import Registry, Sku
+
         cmd = self._setup_cmd()
 
         if registry_exists:
@@ -1209,6 +1208,7 @@ class AcrMockCommandsTests(unittest.TestCase):
 
         # Test get refresh token
         get_login_credentials(cmd, registry_name, tenant_suffix=tenant_suffix)
+        self._validate_raw_token_request(mock_get_raw_token)
         self._validate_refresh_token_request(mock_requests_get, mock_requests_post, login_server)
 
         # Test get access token for container image repository
@@ -1239,6 +1239,9 @@ class AcrMockCommandsTests(unittest.TestCase):
             'refresh_token': TEST_ACR_REFRESH_TOKEN,
             'access_token': TEST_ACR_ACCESS_TOKEN}).encode()
         mock_requests_post.return_value = token_response
+
+    def _validate_raw_token_request(self, mock_get_raw_token):
+        mock_get_raw_token.assert_called_with(mock.ANY, resource="https://containerregistry.azure.net", subscription=mock.ANY)
 
     def _validate_refresh_token_request(self, mock_requests_get, mock_requests_post, login_server):
         mock_requests_get.assert_called_with('https://{}/v2/'.format(login_server), verify=mock.ANY)
@@ -1394,7 +1397,7 @@ class AcrMockCommandsTests(unittest.TestCase):
 
         mock_get_access_credentials.return_value = 'testregistry.azurecr.io', EMPTY_GUID, 'password'
 
-        builtins_open = '__builtin__.open' if sys.version_info[0] < 3 else 'builtins.open'
+        builtins_open = 'builtins.open'
 
         # Push a chart
         with mock.patch(builtins_open) as mock_open:
@@ -1445,3 +1448,43 @@ class AcrMockCommandsTests(unittest.TestCase):
         mock_sku.premium.value = 'Premium'
         cmd.get_models.return_value = mock_sku
         return cmd
+
+
+class ResolveAcrScopeTests(unittest.TestCase):
+    """Unit tests for _docker_utils._resolve_acr_scope.
+
+    The helper resolves the AAD audience used for ACR's /oauth2/exchange call.
+    Operators can override the default via ``az config set acr.audience_resource=<value>``.
+    """
+
+    @staticmethod
+    def _ctx(configured):
+        cli_ctx = mock.MagicMock()
+        cli_ctx.config.get.return_value = configured
+        return cli_ctx
+
+    def test_default_when_unset(self):
+        self.assertEqual(
+            _resolve_acr_scope(self._ctx(None)),
+            "https://{}.azure.net".format(ACR_AUDIENCE_RESOURCE_NAME),
+        )
+
+    def test_short_name_is_expanded(self):
+        self.assertEqual(
+            _resolve_acr_scope(self._ctx("containerregistry")),
+            "https://containerregistry.azure.net",
+        )
+
+    def test_full_url_is_used_verbatim(self):
+        self.assertEqual(
+            _resolve_acr_scope(self._ctx("https://customregistry.example.com")),
+            "https://customregistry.example.com",
+        )
+
+    def test_config_exception_falls_back_to_default(self):
+        cli_ctx = mock.MagicMock()
+        cli_ctx.config.get.side_effect = RuntimeError("no config")
+        self.assertEqual(
+            _resolve_acr_scope(cli_ctx),
+            "https://{}.azure.net".format(ACR_AUDIENCE_RESOURCE_NAME),
+        )

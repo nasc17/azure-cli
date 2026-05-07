@@ -25,9 +25,9 @@ class Create(AAZCommand):
     """
 
     _aaz_info = {
-        "version": "2024-02-01",
+        "version": "2025-09-01-preview",
         "resources": [
-            ["mgmt-plane", "/subscriptions/{}/resourcegroups/{}/providers/microsoft.cdn/profiles/{}/rulesets/{}/rules/{}", "2024-02-01"],
+            ["mgmt-plane", "/subscriptions/{}/resourcegroups/{}/providers/microsoft.cdn/profiles/{}/rulesets/{}/rules/{}", "2025-09-01-preview"],
         ]
     }
 
@@ -52,6 +52,11 @@ class Create(AAZCommand):
             options=["--profile-name"],
             help="Name of the Azure Front Door Standard or Azure Front Door Premium profile which is unique within the resource group.",
             required=True,
+            fmt=AAZStrArgFormat(
+                pattern="^[a-zA-Z0-9]+(-*[a-zA-Z0-9])*$",
+                max_length=260,
+                min_length=1,
+            ),
         )
         _args_schema.resource_group = AAZResourceGroupNameArg(
             required=True,
@@ -97,11 +102,17 @@ class Create(AAZCommand):
         actions.Element = AAZObjectArg()
 
         _element = cls._args_schema.actions.Element
+        _element.afd_url_signing = AAZObjectArg(
+            options=["afd-url-signing"],
+        )
         _element.cache_expiration = AAZObjectArg(
             options=["cache-expiration"],
         )
         _element.cache_key_query_string = AAZObjectArg(
             options=["cache-key-query-string"],
+        )
+        _element.edge_action = AAZObjectArg(
+            options=["edge-action"],
         )
         _element.modify_request_header = AAZObjectArg(
             options=["modify-request-header"],
@@ -124,6 +135,39 @@ class Create(AAZCommand):
         _element.url_signing = AAZObjectArg(
             options=["url-signing"],
         )
+
+        afd_url_signing = cls._args_schema.actions.Element.afd_url_signing
+        afd_url_signing.parameters = AAZObjectArg(
+            options=["parameters"],
+            help="Defines the parameters for the action.",
+            required=True,
+        )
+
+        parameters = cls._args_schema.actions.Element.afd_url_signing.parameters
+        parameters.algorithm = AAZStrArg(
+            options=["algorithm"],
+            help="Algorithm to use for URL signing",
+            enum={"SHA256": "SHA256"},
+        )
+        parameters.key_group_reference = AAZObjectArg(
+            options=["key-group-reference"],
+            help="Resource reference to the Azure Key Vault secret. Expected to be in format of /subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/providers/Microsoft.Cdn/profiles/{profileName}/keyGroups/{keyGroupName}",
+            required=True,
+        )
+        cls._build_args_resource_reference_create(parameters.key_group_reference)
+        parameters.parameter_name_override = AAZListArg(
+            options=["parameter-name-override"],
+            help="Defines which query string parameters in the url to be considered for expires, key id etc.",
+        )
+        parameters.type_name = AAZStrArg(
+            options=["type-name"],
+            required=True,
+            enum={"DeliveryRuleAfdUrlSigningActionParameters": "DeliveryRuleAfdUrlSigningActionParameters"},
+        )
+
+        parameter_name_override = cls._args_schema.actions.Element.afd_url_signing.parameters.parameter_name_override
+        parameter_name_override.Element = AAZObjectArg()
+        cls._build_args_url_signing_param_identifier_create(parameter_name_override.Element)
 
         cache_expiration = cls._args_schema.actions.Element.cache_expiration
         cache_expiration.parameters = AAZObjectArg(
@@ -150,11 +194,6 @@ class Create(AAZCommand):
             required=True,
             enum={"All": "All"},
         )
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRuleCacheExpirationActionParameters": "DeliveryRuleCacheExpirationActionParameters"},
-        )
 
         cache_key_query_string = cls._args_schema.actions.Element.cache_key_query_string
         cache_key_query_string.parameters = AAZObjectArg(
@@ -175,10 +214,26 @@ class Create(AAZCommand):
             required=True,
             enum={"Exclude": "Exclude", "ExcludeAll": "ExcludeAll", "Include": "Include", "IncludeAll": "IncludeAll"},
         )
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
+
+        edge_action = cls._args_schema.actions.Element.edge_action
+        edge_action.parameters = AAZObjectArg(
+            options=["parameters"],
+            help="Defines the parameters for the action.",
             required=True,
-            enum={"DeliveryRuleCacheKeyQueryStringBehaviorActionParameters": "DeliveryRuleCacheKeyQueryStringBehaviorActionParameters"},
+        )
+
+        parameters = cls._args_schema.actions.Element.edge_action.parameters
+        parameters.edge_action_reference = AAZObjectArg(
+            options=["edge-action-reference"],
+            help="defines the edge action that will be invoked.",
+            required=True,
+        )
+        cls._build_args_resource_reference_create(parameters.edge_action_reference)
+        parameters.invocation_point = AAZStrArg(
+            options=["invocation-point"],
+            help="Defines at which point in the request processing pipeline the edge action will be invoked.",
+            required=True,
+            enum={"ClientRequest": "ClientRequest", "OriginRequest": "OriginRequest"},
         )
 
         modify_request_header = cls._args_schema.actions.Element.modify_request_header
@@ -211,11 +266,6 @@ class Create(AAZCommand):
             required=True,
         )
         cls._build_args_resource_reference_create(parameters.origin_group)
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRuleOriginGroupOverrideActionParameters": "DeliveryRuleOriginGroupOverrideActionParameters"},
-        )
 
         route_configuration_override = cls._args_schema.actions.Element.route_configuration_override
         route_configuration_override.parameters = AAZObjectArg(
@@ -232,11 +282,6 @@ class Create(AAZCommand):
         parameters.origin_group_override = AAZObjectArg(
             options=["origin-group-override"],
             help="A reference to the origin group override configuration. Leave empty to use the default origin group on route.",
-        )
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRuleRouteConfigurationOverrideActionParameters": "DeliveryRuleRouteConfigurationOverrideActionParameters"},
         )
 
         cache_configuration = cls._args_schema.actions.Element.route_configuration_override.parameters.cache_configuration
@@ -311,11 +356,6 @@ class Create(AAZCommand):
             required=True,
             enum={"Found": "Found", "Moved": "Moved", "PermanentRedirect": "PermanentRedirect", "TemporaryRedirect": "TemporaryRedirect"},
         )
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRuleUrlRedirectActionParameters": "DeliveryRuleUrlRedirectActionParameters"},
-        )
 
         url_rewrite = cls._args_schema.actions.Element.url_rewrite
         url_rewrite.parameters = AAZObjectArg(
@@ -339,11 +379,6 @@ class Create(AAZCommand):
             help="define a request URI pattern that identifies the type of requests that may be rewritten. If value is blank, all strings are matched.",
             required=True,
         )
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRuleUrlRewriteActionParameters": "DeliveryRuleUrlRewriteActionParameters"},
-        )
 
         url_signing = cls._args_schema.actions.Element.url_signing
         url_signing.parameters = AAZObjectArg(
@@ -362,27 +397,10 @@ class Create(AAZCommand):
             options=["parameter-name-override"],
             help="Defines which query string parameters in the url to be considered for expires, key id etc. ",
         )
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRuleUrlSigningActionParameters": "DeliveryRuleUrlSigningActionParameters"},
-        )
 
         parameter_name_override = cls._args_schema.actions.Element.url_signing.parameters.parameter_name_override
         parameter_name_override.Element = AAZObjectArg()
-
-        _element = cls._args_schema.actions.Element.url_signing.parameters.parameter_name_override.Element
-        _element.param_indicator = AAZStrArg(
-            options=["param-indicator"],
-            help="Indicates the purpose of the parameter",
-            required=True,
-            enum={"Expires": "Expires", "KeyId": "KeyId", "Signature": "Signature"},
-        )
-        _element.param_name = AAZStrArg(
-            options=["param-name"],
-            help="Parameter name",
-            required=True,
-        )
+        cls._build_args_url_signing_param_identifier_create(parameter_name_override.Element)
 
         conditions = cls._args_schema.conditions
         conditions.Element = AAZObjectArg()
@@ -473,11 +491,6 @@ class Create(AAZCommand):
             options=["transforms"],
             help="List of transforms",
         )
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRuleClientPortConditionParameters": "DeliveryRuleClientPortConditionParameters"},
-        )
 
         match_values = cls._args_schema.conditions.Element.client_port.parameters.match_values
         match_values.Element = AAZStrArg()
@@ -518,11 +531,6 @@ class Create(AAZCommand):
             options=["transforms"],
             help="List of transforms",
         )
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRuleCookiesConditionParameters": "DeliveryRuleCookiesConditionParameters"},
-        )
 
         match_values = cls._args_schema.conditions.Element.cookies.parameters.match_values
         match_values.Element = AAZStrArg()
@@ -558,11 +566,6 @@ class Create(AAZCommand):
         parameters.transforms = AAZListArg(
             options=["transforms"],
             help="List of transforms",
-        )
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRuleHostNameConditionParameters": "DeliveryRuleHostNameConditionParameters"},
         )
 
         match_values = cls._args_schema.conditions.Element.host_name.parameters.match_values
@@ -600,11 +603,6 @@ class Create(AAZCommand):
             options=["transforms"],
             help="List of transforms",
         )
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRuleHttpVersionConditionParameters": "DeliveryRuleHttpVersionConditionParameters"},
-        )
 
         match_values = cls._args_schema.conditions.Element.http_version.parameters.match_values
         match_values.Element = AAZStrArg()
@@ -640,11 +638,6 @@ class Create(AAZCommand):
         parameters.transforms = AAZListArg(
             options=["transforms"],
             help="List of transforms",
-        )
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRuleIsDeviceConditionParameters": "DeliveryRuleIsDeviceConditionParameters"},
         )
 
         match_values = cls._args_schema.conditions.Element.is_device.parameters.match_values
@@ -688,11 +681,6 @@ class Create(AAZCommand):
             options=["transforms"],
             help="List of transforms",
         )
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRulePostArgsConditionParameters": "DeliveryRulePostArgsConditionParameters"},
-        )
 
         match_values = cls._args_schema.conditions.Element.post_args.parameters.match_values
         match_values.Element = AAZStrArg()
@@ -728,11 +716,6 @@ class Create(AAZCommand):
         parameters.transforms = AAZListArg(
             options=["transforms"],
             help="List of transforms",
-        )
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRuleQueryStringConditionParameters": "DeliveryRuleQueryStringConditionParameters"},
         )
 
         match_values = cls._args_schema.conditions.Element.query_string.parameters.match_values
@@ -770,11 +753,6 @@ class Create(AAZCommand):
             options=["transforms"],
             help="List of transforms",
         )
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRuleRemoteAddressConditionParameters": "DeliveryRuleRemoteAddressConditionParameters"},
-        )
 
         match_values = cls._args_schema.conditions.Element.remote_address.parameters.match_values
         match_values.Element = AAZStrArg()
@@ -810,11 +788,6 @@ class Create(AAZCommand):
         parameters.transforms = AAZListArg(
             options=["transforms"],
             help="List of transforms",
-        )
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRuleRequestBodyConditionParameters": "DeliveryRuleRequestBodyConditionParameters"},
         )
 
         match_values = cls._args_schema.conditions.Element.request_body.parameters.match_values
@@ -856,11 +829,6 @@ class Create(AAZCommand):
             options=["transforms"],
             help="List of transforms",
         )
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRuleRequestHeaderConditionParameters": "DeliveryRuleRequestHeaderConditionParameters"},
-        )
 
         match_values = cls._args_schema.conditions.Element.request_header.parameters.match_values
         match_values.Element = AAZStrArg()
@@ -896,11 +864,6 @@ class Create(AAZCommand):
         parameters.transforms = AAZListArg(
             options=["transforms"],
             help="List of transforms",
-        )
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRuleRequestMethodConditionParameters": "DeliveryRuleRequestMethodConditionParameters"},
         )
 
         match_values = cls._args_schema.conditions.Element.request_method.parameters.match_values
@@ -940,11 +903,6 @@ class Create(AAZCommand):
             options=["transforms"],
             help="List of transforms",
         )
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRuleRequestSchemeConditionParameters": "DeliveryRuleRequestSchemeConditionParameters"},
-        )
 
         match_values = cls._args_schema.conditions.Element.request_scheme.parameters.match_values
         match_values.Element = AAZStrArg(
@@ -983,11 +941,6 @@ class Create(AAZCommand):
             options=["transforms"],
             help="List of transforms",
         )
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRuleRequestUriConditionParameters": "DeliveryRuleRequestUriConditionParameters"},
-        )
 
         match_values = cls._args_schema.conditions.Element.request_uri.parameters.match_values
         match_values.Element = AAZStrArg()
@@ -1023,11 +976,6 @@ class Create(AAZCommand):
         parameters.transforms = AAZListArg(
             options=["transforms"],
             help="List of transforms",
-        )
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRuleServerPortConditionParameters": "DeliveryRuleServerPortConditionParameters"},
         )
 
         match_values = cls._args_schema.conditions.Element.server_port.parameters.match_values
@@ -1065,11 +1013,6 @@ class Create(AAZCommand):
             options=["transforms"],
             help="List of transforms",
         )
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRuleSocketAddrConditionParameters": "DeliveryRuleSocketAddrConditionParameters"},
-        )
 
         match_values = cls._args_schema.conditions.Element.socket_addr.parameters.match_values
         match_values.Element = AAZStrArg()
@@ -1105,11 +1048,6 @@ class Create(AAZCommand):
         parameters.transforms = AAZListArg(
             options=["transforms"],
             help="List of transforms",
-        )
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRuleSslProtocolConditionParameters": "DeliveryRuleSslProtocolConditionParameters"},
         )
 
         match_values = cls._args_schema.conditions.Element.ssl_protocol.parameters.match_values
@@ -1149,11 +1087,6 @@ class Create(AAZCommand):
             options=["transforms"],
             help="List of transforms",
         )
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRuleUrlFileExtensionMatchConditionParameters": "DeliveryRuleUrlFileExtensionMatchConditionParameters"},
-        )
 
         match_values = cls._args_schema.conditions.Element.url_file_extension.parameters.match_values
         match_values.Element = AAZStrArg()
@@ -1189,11 +1122,6 @@ class Create(AAZCommand):
         parameters.transforms = AAZListArg(
             options=["transforms"],
             help="List of transforms",
-        )
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRuleUrlFilenameConditionParameters": "DeliveryRuleUrlFilenameConditionParameters"},
         )
 
         match_values = cls._args_schema.conditions.Element.url_file_name.parameters.match_values
@@ -1231,11 +1159,6 @@ class Create(AAZCommand):
             options=["transforms"],
             help="List of transforms",
         )
-        parameters.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRuleUrlPathMatchConditionParameters": "DeliveryRuleUrlPathMatchConditionParameters"},
-        )
 
         match_values = cls._args_schema.conditions.Element.url_path.parameters.match_values
         match_values.Element = AAZStrArg()
@@ -1253,7 +1176,6 @@ class Create(AAZCommand):
         if cls._args_header_action_parameters_create is not None:
             _schema.header_action = cls._args_header_action_parameters_create.header_action
             _schema.header_name = cls._args_header_action_parameters_create.header_name
-            _schema.type_name = cls._args_header_action_parameters_create.type_name
             _schema.value = cls._args_header_action_parameters_create.value
             return
 
@@ -1271,11 +1193,6 @@ class Create(AAZCommand):
             help="Name of the header to modify",
             required=True,
         )
-        header_action_parameters_create.type_name = AAZStrArg(
-            options=["type-name"],
-            required=True,
-            enum={"DeliveryRuleHeaderActionParameters": "DeliveryRuleHeaderActionParameters"},
-        )
         header_action_parameters_create.value = AAZStrArg(
             options=["value"],
             help="Value for the specified action",
@@ -1283,7 +1200,6 @@ class Create(AAZCommand):
 
         _schema.header_action = cls._args_header_action_parameters_create.header_action
         _schema.header_name = cls._args_header_action_parameters_create.header_name
-        _schema.type_name = cls._args_header_action_parameters_create.type_name
         _schema.value = cls._args_header_action_parameters_create.value
 
     _args_resource_reference_create = None
@@ -1303,6 +1219,33 @@ class Create(AAZCommand):
         )
 
         _schema.id = cls._args_resource_reference_create.id
+
+    _args_url_signing_param_identifier_create = None
+
+    @classmethod
+    def _build_args_url_signing_param_identifier_create(cls, _schema):
+        if cls._args_url_signing_param_identifier_create is not None:
+            _schema.param_indicator = cls._args_url_signing_param_identifier_create.param_indicator
+            _schema.param_name = cls._args_url_signing_param_identifier_create.param_name
+            return
+
+        cls._args_url_signing_param_identifier_create = AAZObjectArg()
+
+        url_signing_param_identifier_create = cls._args_url_signing_param_identifier_create
+        url_signing_param_identifier_create.param_indicator = AAZStrArg(
+            options=["param-indicator"],
+            help="Indicates the purpose of the parameter",
+            required=True,
+            enum={"Expires": "Expires", "KeyId": "KeyId", "Signature": "Signature"},
+        )
+        url_signing_param_identifier_create.param_name = AAZStrArg(
+            options=["param-name"],
+            help="Parameter name",
+            required=True,
+        )
+
+        _schema.param_indicator = cls._args_url_signing_param_identifier_create.param_indicator
+        _schema.param_name = cls._args_url_signing_param_identifier_create.param_name
 
     def _execute_operations(self):
         self.pre_operations()
@@ -1393,7 +1336,7 @@ class Create(AAZCommand):
         def query_parameters(self):
             parameters = {
                 **self.serialize_query_param(
-                    "api-version", "2024-02-01",
+                    "api-version", "2025-09-01-preview",
                     required=True,
                 ),
             }
@@ -1422,10 +1365,10 @@ class Create(AAZCommand):
 
             properties = _builder.get(".properties")
             if properties is not None:
-                properties.set_prop("actions", AAZListType, ".actions", typ_kwargs={"flags": {"required": True}})
+                properties.set_prop("actions", AAZListType, ".actions")
                 properties.set_prop("conditions", AAZListType, ".conditions")
                 properties.set_prop("matchProcessingBehavior", AAZStrType, ".match_processing_behavior")
-                properties.set_prop("order", AAZIntType, ".order", typ_kwargs={"flags": {"required": True}})
+                properties.set_prop("order", AAZIntType, ".order")
 
             actions = _builder.get(".properties.actions")
             if actions is not None:
@@ -1433,8 +1376,10 @@ class Create(AAZCommand):
 
             _elements = _builder.get(".properties.actions[]")
             if _elements is not None:
+                _elements.set_const("name", "AfdUrlSigning", AAZStrType, ".afd_url_signing", typ_kwargs={"flags": {"required": True}})
                 _elements.set_const("name", "CacheExpiration", AAZStrType, ".cache_expiration", typ_kwargs={"flags": {"required": True}})
                 _elements.set_const("name", "CacheKeyQueryString", AAZStrType, ".cache_key_query_string", typ_kwargs={"flags": {"required": True}})
+                _elements.set_const("name", "EdgeAction", AAZStrType, ".edge_action", typ_kwargs={"flags": {"required": True}})
                 _elements.set_const("name", "ModifyRequestHeader", AAZStrType, ".modify_request_header", typ_kwargs={"flags": {"required": True}})
                 _elements.set_const("name", "ModifyResponseHeader", AAZStrType, ".modify_response_header", typ_kwargs={"flags": {"required": True}})
                 _elements.set_const("name", "OriginGroupOverride", AAZStrType, ".origin_group_override", typ_kwargs={"flags": {"required": True}})
@@ -1442,8 +1387,10 @@ class Create(AAZCommand):
                 _elements.set_const("name", "UrlRedirect", AAZStrType, ".url_redirect", typ_kwargs={"flags": {"required": True}})
                 _elements.set_const("name", "UrlRewrite", AAZStrType, ".url_rewrite", typ_kwargs={"flags": {"required": True}})
                 _elements.set_const("name", "UrlSigning", AAZStrType, ".url_signing", typ_kwargs={"flags": {"required": True}})
+                _elements.discriminate_by("name", "AfdUrlSigning")
                 _elements.discriminate_by("name", "CacheExpiration")
                 _elements.discriminate_by("name", "CacheKeyQueryString")
+                _elements.discriminate_by("name", "EdgeAction")
                 _elements.discriminate_by("name", "ModifyRequestHeader")
                 _elements.discriminate_by("name", "ModifyResponseHeader")
                 _elements.discriminate_by("name", "OriginGroupOverride")
@@ -1451,6 +1398,21 @@ class Create(AAZCommand):
                 _elements.discriminate_by("name", "UrlRedirect")
                 _elements.discriminate_by("name", "UrlRewrite")
                 _elements.discriminate_by("name", "UrlSigning")
+
+            disc_afd_url_signing = _builder.get(".properties.actions[]{name:AfdUrlSigning}")
+            if disc_afd_url_signing is not None:
+                disc_afd_url_signing.set_prop("parameters", AAZObjectType, ".afd_url_signing.parameters", typ_kwargs={"flags": {"required": True}})
+
+            parameters = _builder.get(".properties.actions[]{name:AfdUrlSigning}.parameters")
+            if parameters is not None:
+                parameters.set_prop("algorithm", AAZStrType, ".algorithm")
+                _CreateHelper._build_schema_resource_reference_create(parameters.set_prop("keyGroupReference", AAZObjectType, ".key_group_reference", typ_kwargs={"flags": {"required": True}}))
+                parameters.set_prop("parameterNameOverride", AAZListType, ".parameter_name_override")
+                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+
+            parameter_name_override = _builder.get(".properties.actions[]{name:AfdUrlSigning}.parameters.parameterNameOverride")
+            if parameter_name_override is not None:
+                _CreateHelper._build_schema_url_signing_param_identifier_create(parameter_name_override.set_elements(AAZObjectType, "."))
 
             disc_cache_expiration = _builder.get(".properties.actions[]{name:CacheExpiration}")
             if disc_cache_expiration is not None:
@@ -1461,7 +1423,7 @@ class Create(AAZCommand):
                 parameters.set_prop("cacheBehavior", AAZStrType, ".cache_behavior", typ_kwargs={"flags": {"required": True}})
                 parameters.set_prop("cacheDuration", AAZStrType, ".cache_duration", typ_kwargs={"nullable": True})
                 parameters.set_prop("cacheType", AAZStrType, ".cache_type", typ_kwargs={"flags": {"required": True}})
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleCacheExpirationActionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             disc_cache_key_query_string = _builder.get(".properties.actions[]{name:CacheKeyQueryString}")
             if disc_cache_key_query_string is not None:
@@ -1471,7 +1433,17 @@ class Create(AAZCommand):
             if parameters is not None:
                 parameters.set_prop("queryParameters", AAZStrType, ".query_parameters", typ_kwargs={"nullable": True})
                 parameters.set_prop("queryStringBehavior", AAZStrType, ".query_string_behavior", typ_kwargs={"flags": {"required": True}})
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleCacheKeyQueryStringBehaviorActionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
+
+            disc_edge_action = _builder.get(".properties.actions[]{name:EdgeAction}")
+            if disc_edge_action is not None:
+                disc_edge_action.set_prop("parameters", AAZObjectType, ".edge_action.parameters", typ_kwargs={"flags": {"required": True}})
+
+            parameters = _builder.get(".properties.actions[]{name:EdgeAction}.parameters")
+            if parameters is not None:
+                _CreateHelper._build_schema_resource_reference_create(parameters.set_prop("edgeActionReference", AAZObjectType, ".edge_action_reference", typ_kwargs={"flags": {"required": True}}))
+                parameters.set_prop("invocationPoint", AAZStrType, ".invocation_point", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleEdgeActionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             disc_modify_request_header = _builder.get(".properties.actions[]{name:ModifyRequestHeader}")
             if disc_modify_request_header is not None:
@@ -1488,7 +1460,7 @@ class Create(AAZCommand):
             parameters = _builder.get(".properties.actions[]{name:OriginGroupOverride}.parameters")
             if parameters is not None:
                 _CreateHelper._build_schema_resource_reference_create(parameters.set_prop("originGroup", AAZObjectType, ".origin_group", typ_kwargs={"flags": {"required": True}}))
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleOriginGroupOverrideActionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             disc_route_configuration_override = _builder.get(".properties.actions[]{name:RouteConfigurationOverride}")
             if disc_route_configuration_override is not None:
@@ -1498,7 +1470,7 @@ class Create(AAZCommand):
             if parameters is not None:
                 parameters.set_prop("cacheConfiguration", AAZObjectType, ".cache_configuration")
                 parameters.set_prop("originGroupOverride", AAZObjectType, ".origin_group_override")
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleRouteConfigurationOverrideActionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             cache_configuration = _builder.get(".properties.actions[]{name:RouteConfigurationOverride}.parameters.cacheConfiguration")
             if cache_configuration is not None:
@@ -1525,7 +1497,7 @@ class Create(AAZCommand):
                 parameters.set_prop("customQueryString", AAZStrType, ".custom_querystring")
                 parameters.set_prop("destinationProtocol", AAZStrType, ".destination_protocol")
                 parameters.set_prop("redirectType", AAZStrType, ".redirect_type", typ_kwargs={"flags": {"required": True}})
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleUrlRedirectActionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             disc_url_rewrite = _builder.get(".properties.actions[]{name:UrlRewrite}")
             if disc_url_rewrite is not None:
@@ -1536,7 +1508,7 @@ class Create(AAZCommand):
                 parameters.set_prop("destination", AAZStrType, ".destination", typ_kwargs={"flags": {"required": True}})
                 parameters.set_prop("preserveUnmatchedPath", AAZBoolType, ".preserve_unmatched_path")
                 parameters.set_prop("sourcePattern", AAZStrType, ".source_pattern", typ_kwargs={"flags": {"required": True}})
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleUrlRewriteActionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             disc_url_signing = _builder.get(".properties.actions[]{name:UrlSigning}")
             if disc_url_signing is not None:
@@ -1546,16 +1518,11 @@ class Create(AAZCommand):
             if parameters is not None:
                 parameters.set_prop("algorithm", AAZStrType, ".algorithm")
                 parameters.set_prop("parameterNameOverride", AAZListType, ".parameter_name_override")
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleUrlSigningActionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             parameter_name_override = _builder.get(".properties.actions[]{name:UrlSigning}.parameters.parameterNameOverride")
             if parameter_name_override is not None:
-                parameter_name_override.set_elements(AAZObjectType, ".")
-
-            _elements = _builder.get(".properties.actions[]{name:UrlSigning}.parameters.parameterNameOverride[]")
-            if _elements is not None:
-                _elements.set_prop("paramIndicator", AAZStrType, ".param_indicator", typ_kwargs={"flags": {"required": True}})
-                _elements.set_prop("paramName", AAZStrType, ".param_name", typ_kwargs={"flags": {"required": True}})
+                _CreateHelper._build_schema_url_signing_param_identifier_create(parameter_name_override.set_elements(AAZObjectType, "."))
 
             conditions = _builder.get(".properties.conditions")
             if conditions is not None:
@@ -1612,7 +1579,7 @@ class Create(AAZCommand):
                 parameters.set_prop("negateCondition", AAZBoolType, ".negate_condition")
                 parameters.set_prop("operator", AAZStrType, ".operator", typ_kwargs={"flags": {"required": True}})
                 parameters.set_prop("transforms", AAZListType, ".transforms")
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleClientPortConditionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             match_values = _builder.get(".properties.conditions[]{name:ClientPort}.parameters.matchValues")
             if match_values is not None:
@@ -1633,7 +1600,7 @@ class Create(AAZCommand):
                 parameters.set_prop("operator", AAZStrType, ".operator", typ_kwargs={"flags": {"required": True}})
                 parameters.set_prop("selector", AAZStrType, ".selector")
                 parameters.set_prop("transforms", AAZListType, ".transforms")
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleCookiesConditionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             match_values = _builder.get(".properties.conditions[]{name:Cookies}.parameters.matchValues")
             if match_values is not None:
@@ -1653,7 +1620,7 @@ class Create(AAZCommand):
                 parameters.set_prop("negateCondition", AAZBoolType, ".negate_condition")
                 parameters.set_prop("operator", AAZStrType, ".operator", typ_kwargs={"flags": {"required": True}})
                 parameters.set_prop("transforms", AAZListType, ".transforms")
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleHostNameConditionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             match_values = _builder.get(".properties.conditions[]{name:HostName}.parameters.matchValues")
             if match_values is not None:
@@ -1673,7 +1640,7 @@ class Create(AAZCommand):
                 parameters.set_prop("negateCondition", AAZBoolType, ".negate_condition")
                 parameters.set_prop("operator", AAZStrType, ".operator", typ_kwargs={"flags": {"required": True}})
                 parameters.set_prop("transforms", AAZListType, ".transforms")
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleHttpVersionConditionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             match_values = _builder.get(".properties.conditions[]{name:HttpVersion}.parameters.matchValues")
             if match_values is not None:
@@ -1693,7 +1660,7 @@ class Create(AAZCommand):
                 parameters.set_prop("negateCondition", AAZBoolType, ".negate_condition")
                 parameters.set_prop("operator", AAZStrType, ".operator", typ_kwargs={"flags": {"required": True}})
                 parameters.set_prop("transforms", AAZListType, ".transforms")
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleIsDeviceConditionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             match_values = _builder.get(".properties.conditions[]{name:IsDevice}.parameters.matchValues")
             if match_values is not None:
@@ -1714,7 +1681,7 @@ class Create(AAZCommand):
                 parameters.set_prop("operator", AAZStrType, ".operator", typ_kwargs={"flags": {"required": True}})
                 parameters.set_prop("selector", AAZStrType, ".selector")
                 parameters.set_prop("transforms", AAZListType, ".transforms")
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRulePostArgsConditionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             match_values = _builder.get(".properties.conditions[]{name:PostArgs}.parameters.matchValues")
             if match_values is not None:
@@ -1734,7 +1701,7 @@ class Create(AAZCommand):
                 parameters.set_prop("negateCondition", AAZBoolType, ".negate_condition")
                 parameters.set_prop("operator", AAZStrType, ".operator", typ_kwargs={"flags": {"required": True}})
                 parameters.set_prop("transforms", AAZListType, ".transforms")
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleQueryStringConditionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             match_values = _builder.get(".properties.conditions[]{name:QueryString}.parameters.matchValues")
             if match_values is not None:
@@ -1754,7 +1721,7 @@ class Create(AAZCommand):
                 parameters.set_prop("negateCondition", AAZBoolType, ".negate_condition")
                 parameters.set_prop("operator", AAZStrType, ".operator", typ_kwargs={"flags": {"required": True}})
                 parameters.set_prop("transforms", AAZListType, ".transforms")
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleRemoteAddressConditionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             match_values = _builder.get(".properties.conditions[]{name:RemoteAddress}.parameters.matchValues")
             if match_values is not None:
@@ -1774,7 +1741,7 @@ class Create(AAZCommand):
                 parameters.set_prop("negateCondition", AAZBoolType, ".negate_condition")
                 parameters.set_prop("operator", AAZStrType, ".operator", typ_kwargs={"flags": {"required": True}})
                 parameters.set_prop("transforms", AAZListType, ".transforms")
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleRequestBodyConditionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             match_values = _builder.get(".properties.conditions[]{name:RequestBody}.parameters.matchValues")
             if match_values is not None:
@@ -1795,7 +1762,7 @@ class Create(AAZCommand):
                 parameters.set_prop("operator", AAZStrType, ".operator", typ_kwargs={"flags": {"required": True}})
                 parameters.set_prop("selector", AAZStrType, ".selector")
                 parameters.set_prop("transforms", AAZListType, ".transforms")
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleRequestHeaderConditionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             match_values = _builder.get(".properties.conditions[]{name:RequestHeader}.parameters.matchValues")
             if match_values is not None:
@@ -1815,7 +1782,7 @@ class Create(AAZCommand):
                 parameters.set_prop("negateCondition", AAZBoolType, ".negate_condition")
                 parameters.set_prop("operator", AAZStrType, ".operator", typ_kwargs={"flags": {"required": True}})
                 parameters.set_prop("transforms", AAZListType, ".transforms")
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleRequestMethodConditionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             match_values = _builder.get(".properties.conditions[]{name:RequestMethod}.parameters.matchValues")
             if match_values is not None:
@@ -1835,7 +1802,7 @@ class Create(AAZCommand):
                 parameters.set_prop("negateCondition", AAZBoolType, ".negate_condition")
                 parameters.set_prop("operator", AAZStrType, ".operator", typ_kwargs={"flags": {"required": True}})
                 parameters.set_prop("transforms", AAZListType, ".transforms")
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleRequestSchemeConditionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             match_values = _builder.get(".properties.conditions[]{name:RequestScheme}.parameters.matchValues")
             if match_values is not None:
@@ -1855,7 +1822,7 @@ class Create(AAZCommand):
                 parameters.set_prop("negateCondition", AAZBoolType, ".negate_condition")
                 parameters.set_prop("operator", AAZStrType, ".operator", typ_kwargs={"flags": {"required": True}})
                 parameters.set_prop("transforms", AAZListType, ".transforms")
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleRequestUriConditionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             match_values = _builder.get(".properties.conditions[]{name:RequestUri}.parameters.matchValues")
             if match_values is not None:
@@ -1875,7 +1842,7 @@ class Create(AAZCommand):
                 parameters.set_prop("negateCondition", AAZBoolType, ".negate_condition")
                 parameters.set_prop("operator", AAZStrType, ".operator", typ_kwargs={"flags": {"required": True}})
                 parameters.set_prop("transforms", AAZListType, ".transforms")
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleServerPortConditionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             match_values = _builder.get(".properties.conditions[]{name:ServerPort}.parameters.matchValues")
             if match_values is not None:
@@ -1895,7 +1862,7 @@ class Create(AAZCommand):
                 parameters.set_prop("negateCondition", AAZBoolType, ".negate_condition")
                 parameters.set_prop("operator", AAZStrType, ".operator", typ_kwargs={"flags": {"required": True}})
                 parameters.set_prop("transforms", AAZListType, ".transforms")
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleSocketAddrConditionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             match_values = _builder.get(".properties.conditions[]{name:SocketAddr}.parameters.matchValues")
             if match_values is not None:
@@ -1915,7 +1882,7 @@ class Create(AAZCommand):
                 parameters.set_prop("negateCondition", AAZBoolType, ".negate_condition")
                 parameters.set_prop("operator", AAZStrType, ".operator", typ_kwargs={"flags": {"required": True}})
                 parameters.set_prop("transforms", AAZListType, ".transforms")
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleSslProtocolConditionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             match_values = _builder.get(".properties.conditions[]{name:SslProtocol}.parameters.matchValues")
             if match_values is not None:
@@ -1935,7 +1902,7 @@ class Create(AAZCommand):
                 parameters.set_prop("negateCondition", AAZBoolType, ".negate_condition")
                 parameters.set_prop("operator", AAZStrType, ".operator", typ_kwargs={"flags": {"required": True}})
                 parameters.set_prop("transforms", AAZListType, ".transforms")
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleUrlFileExtensionMatchConditionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             match_values = _builder.get(".properties.conditions[]{name:UrlFileExtension}.parameters.matchValues")
             if match_values is not None:
@@ -1955,7 +1922,7 @@ class Create(AAZCommand):
                 parameters.set_prop("negateCondition", AAZBoolType, ".negate_condition")
                 parameters.set_prop("operator", AAZStrType, ".operator", typ_kwargs={"flags": {"required": True}})
                 parameters.set_prop("transforms", AAZListType, ".transforms")
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleUrlFilenameConditionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             match_values = _builder.get(".properties.conditions[]{name:UrlFileName}.parameters.matchValues")
             if match_values is not None:
@@ -1975,7 +1942,7 @@ class Create(AAZCommand):
                 parameters.set_prop("negateCondition", AAZBoolType, ".negate_condition")
                 parameters.set_prop("operator", AAZStrType, ".operator", typ_kwargs={"flags": {"required": True}})
                 parameters.set_prop("transforms", AAZListType, ".transforms")
-                parameters.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+                parameters.set_const("typeName", "DeliveryRuleUrlPathMatchConditionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
 
             match_values = _builder.get(".properties.conditions[]{name:UrlPath}.parameters.matchValues")
             if match_values is not None:
@@ -2017,7 +1984,7 @@ class _CreateHelper:
             return
         _builder.set_prop("headerAction", AAZStrType, ".header_action", typ_kwargs={"flags": {"required": True}})
         _builder.set_prop("headerName", AAZStrType, ".header_name", typ_kwargs={"flags": {"required": True}})
-        _builder.set_prop("typeName", AAZStrType, ".type_name", typ_kwargs={"flags": {"required": True}})
+        _builder.set_const("typeName", "DeliveryRuleHeaderActionParameters", AAZStrType, ".", typ_kwargs={"flags": {"required": True}})
         _builder.set_prop("value", AAZStrType, ".value")
 
     @classmethod
@@ -2025,6 +1992,13 @@ class _CreateHelper:
         if _builder is None:
             return
         _builder.set_prop("id", AAZStrType, ".id")
+
+    @classmethod
+    def _build_schema_url_signing_param_identifier_create(cls, _builder):
+        if _builder is None:
+            return
+        _builder.set_prop("paramIndicator", AAZStrType, ".param_indicator", typ_kwargs={"flags": {"required": True}})
+        _builder.set_prop("paramName", AAZStrType, ".param_name", typ_kwargs={"flags": {"required": True}})
 
     _schema_header_action_parameters_read = None
 
@@ -2107,9 +2081,7 @@ class _CreateHelper:
         )
 
         properties = _schema_rule_read.properties
-        properties.actions = AAZListType(
-            flags={"required": True},
-        )
+        properties.actions = AAZListType()
         properties.conditions = AAZListType()
         properties.deployment_status = AAZStrType(
             serialized_name="deploymentStatus",
@@ -2118,9 +2090,7 @@ class _CreateHelper:
         properties.match_processing_behavior = AAZStrType(
             serialized_name="matchProcessingBehavior",
         )
-        properties.order = AAZIntType(
-            flags={"required": True},
-        )
+        properties.order = AAZIntType()
         properties.provisioning_state = AAZStrType(
             serialized_name="provisioningState",
             flags={"read_only": True},
@@ -2137,6 +2107,30 @@ class _CreateHelper:
         _element.name = AAZStrType(
             flags={"required": True},
         )
+
+        disc_afd_url_signing = _schema_rule_read.properties.actions.Element.discriminate_by("name", "AfdUrlSigning")
+        disc_afd_url_signing.parameters = AAZObjectType(
+            flags={"required": True},
+        )
+
+        parameters = _schema_rule_read.properties.actions.Element.discriminate_by("name", "AfdUrlSigning").parameters
+        parameters.algorithm = AAZStrType()
+        parameters.key_group_reference = AAZObjectType(
+            serialized_name="keyGroupReference",
+            flags={"required": True},
+        )
+        cls._build_schema_resource_reference_read(parameters.key_group_reference)
+        parameters.parameter_name_override = AAZListType(
+            serialized_name="parameterNameOverride",
+        )
+        parameters.type_name = AAZStrType(
+            serialized_name="typeName",
+            flags={"required": True},
+        )
+
+        parameter_name_override = _schema_rule_read.properties.actions.Element.discriminate_by("name", "AfdUrlSigning").parameters.parameter_name_override
+        parameter_name_override.Element = AAZObjectType()
+        cls._build_schema_url_signing_param_identifier_read(parameter_name_override.Element)
 
         disc_cache_expiration = _schema_rule_read.properties.actions.Element.discriminate_by("name", "CacheExpiration")
         disc_cache_expiration.parameters = AAZObjectType(
@@ -2173,6 +2167,26 @@ class _CreateHelper:
         )
         parameters.query_string_behavior = AAZStrType(
             serialized_name="queryStringBehavior",
+            flags={"required": True},
+        )
+        parameters.type_name = AAZStrType(
+            serialized_name="typeName",
+            flags={"required": True},
+        )
+
+        disc_edge_action = _schema_rule_read.properties.actions.Element.discriminate_by("name", "EdgeAction")
+        disc_edge_action.parameters = AAZObjectType(
+            flags={"required": True},
+        )
+
+        parameters = _schema_rule_read.properties.actions.Element.discriminate_by("name", "EdgeAction").parameters
+        parameters.edge_action_reference = AAZObjectType(
+            serialized_name="edgeActionReference",
+            flags={"required": True},
+        )
+        cls._build_schema_resource_reference_read(parameters.edge_action_reference)
+        parameters.invocation_point = AAZStrType(
+            serialized_name="invocationPoint",
             flags={"required": True},
         )
         parameters.type_name = AAZStrType(
@@ -2319,16 +2333,7 @@ class _CreateHelper:
 
         parameter_name_override = _schema_rule_read.properties.actions.Element.discriminate_by("name", "UrlSigning").parameters.parameter_name_override
         parameter_name_override.Element = AAZObjectType()
-
-        _element = _schema_rule_read.properties.actions.Element.discriminate_by("name", "UrlSigning").parameters.parameter_name_override.Element
-        _element.param_indicator = AAZStrType(
-            serialized_name="paramIndicator",
-            flags={"required": True},
-        )
-        _element.param_name = AAZStrType(
-            serialized_name="paramName",
-            flags={"required": True},
-        )
+        cls._build_schema_url_signing_param_identifier_read(parameter_name_override.Element)
 
         conditions = _schema_rule_read.properties.conditions
         conditions.Element = AAZObjectType()
@@ -2879,6 +2884,30 @@ class _CreateHelper:
         _schema.properties = cls._schema_rule_read.properties
         _schema.system_data = cls._schema_rule_read.system_data
         _schema.type = cls._schema_rule_read.type
+
+    _schema_url_signing_param_identifier_read = None
+
+    @classmethod
+    def _build_schema_url_signing_param_identifier_read(cls, _schema):
+        if cls._schema_url_signing_param_identifier_read is not None:
+            _schema.param_indicator = cls._schema_url_signing_param_identifier_read.param_indicator
+            _schema.param_name = cls._schema_url_signing_param_identifier_read.param_name
+            return
+
+        cls._schema_url_signing_param_identifier_read = _schema_url_signing_param_identifier_read = AAZObjectType()
+
+        url_signing_param_identifier_read = _schema_url_signing_param_identifier_read
+        url_signing_param_identifier_read.param_indicator = AAZStrType(
+            serialized_name="paramIndicator",
+            flags={"required": True},
+        )
+        url_signing_param_identifier_read.param_name = AAZStrType(
+            serialized_name="paramName",
+            flags={"required": True},
+        )
+
+        _schema.param_indicator = cls._schema_url_signing_param_identifier_read.param_indicator
+        _schema.param_name = cls._schema_url_signing_param_identifier_read.param_name
 
 
 __all__ = ["Create"]

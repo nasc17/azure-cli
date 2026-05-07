@@ -7,11 +7,12 @@
 
 import os
 import re
+import shutil
 from knack.util import CLIError
 from knack.log import get_logger
-from azure.cli.core.azclierror import InvalidArgumentValueError
+from azure.cli.core.azclierror import InvalidArgumentValueError, RequiredArgumentMissingError
 from azure.cli.core.util import user_confirmation
-from ._constants import get_managed_sku, get_premium_sku
+from ._constants import AbacRoleAssignmentMode, get_managed_sku, get_premium_sku
 from ._utils import (
     get_registry_by_name,
     validate_managed_registry,
@@ -26,14 +27,29 @@ logger = get_logger(__name__)
 DEF_DIAG_SETTINGS_NAME_TEMPLATE = '{}-diagnostic-settings'
 SYSTEM_ASSIGNED_IDENTITY_ALIAS = '[system]'
 DENY_ACTION = 'Deny'
+DOMAIN_NAME_LABEL_SCOPE_UNSECURE = 'Unsecure'
+DOMAIN_NAME_LABEL_SCOPE_RESOURCE_GROUP_REUSE = 'ResourceGroupReuse'
+REGIONAL_ENDPOINTS_NOT_SUPPORTED = "Regional endpoints are only supported for managed registries in Premium SKU."
+REGIONAL_ENDPOINTS_NOT_SUPPORTED_FOR_DCT = "Regional endpoints cannot be enabled when Content Trust is enabled. " \
+                                           "Please disable Content Trust and try again."
 
 
-def acr_check_name(client, registry_name):
-    registry = {
-        'name': registry_name,
-        'type': 'Microsoft.ContainerRegistry/registries'
-    }
-    return client.check_name_availability(registry)
+def acr_check_name(cmd, client, registry_name, resource_group_name=None, dnl_scope=DOMAIN_NAME_LABEL_SCOPE_UNSECURE):
+    if dnl_scope.lower() == DOMAIN_NAME_LABEL_SCOPE_RESOURCE_GROUP_REUSE.lower() and resource_group_name is None:
+        raise RequiredArgumentMissingError("Resource group name is required for domain name label scope " +
+                                           DOMAIN_NAME_LABEL_SCOPE_RESOURCE_GROUP_REUSE)
+    domain_name_label_scope = _get_domain_name_label_scope(cmd, dnl_scope)
+    if domain_name_label_scope:
+        RegistryNameCheckRequest = cmd.get_models('RegistryNameCheckRequest')
+        registry_check_name_request = RegistryNameCheckRequest(
+            name=registry_name,
+            type='Microsoft.ContainerRegistry/registries',
+            resource_group_name=resource_group_name,
+            auto_generated_domain_name_label_scope=domain_name_label_scope)
+    else:
+        raise RequiredArgumentMissingError("Invalid domain name label scope. The allowed values are 'Unsecure'," +
+                                           " 'TenantReuse', 'SubscriptionReuse', 'ResourceGroupReuse' or 'NoReuse'.")
+    return client.check_name_availability(registry_check_name_request)
 
 
 def acr_list(client, resource_group_name=None):
@@ -58,8 +74,10 @@ def acr_create(cmd,
                allow_trusted_services=None,
                allow_exports=None,
                tags=None,
-               allow_metadata_search=None):
-
+               allow_metadata_search=None,
+               dnl_scope=None,
+               role_assignment_mode=None,
+               regional_endpoints=None):
     if default_action and sku not in get_premium_sku(cmd):
         raise CLIError(NETWORK_RULE_NOT_SUPPORTED)
 
@@ -68,6 +86,9 @@ def acr_create(cmd,
 
     if re.match(r'\w*[A-Z]\w*', registry_name):
         raise InvalidArgumentValueError("argument error: Registry name must use only lowercase.")
+
+    if re.match(r'\w*[-]\w*', registry_name):
+        raise InvalidArgumentValueError("argument error: Registry name cannot contain dashes.")
 
     Registry, Sku, NetworkRuleSet = cmd.get_models('Registry', 'Sku', 'NetworkRuleSet')
     registry = Registry(location=location, sku=Sku(name=sku), admin_user_enabled=admin_enabled,
@@ -84,13 +105,22 @@ def acr_create(cmd,
     if allow_metadata_search is not None:
         _configure_metadata_search(cmd, registry, allow_metadata_search)
 
+    if dnl_scope is not None:
+        _configure_domain_name_label_scope(cmd, registry, dnl_scope)
+
+    if role_assignment_mode is not None:
+        _configure_role_assignment_mode(cmd, registry, role_assignment_mode)
+
+    if regional_endpoints is not None:
+        _configure_regional_endpoints(cmd, registry, sku, regional_endpoints)
+
     _handle_network_bypass(cmd, registry, allow_trusted_services)
     _handle_export_policy(cmd, registry, allow_exports)
 
     lro_poller = client.begin_create(resource_group_name, registry_name, registry)
 
     if workspace:
-        from msrestazure.tools import is_valid_resource_id, resource_id
+        from azure.mgmt.core.tools import is_valid_resource_id, resource_id
         from azure.cli.core.commands import LongRunningOperation
         from azure.cli.core.commands.client_factory import get_subscription_id
         acr = LongRunningOperation(cmd.cli_ctx)(lro_poller)
@@ -128,7 +158,9 @@ def acr_update_custom(cmd,
                       anonymous_pull_enabled=None,
                       allow_exports=None,
                       tags=None,
-                      allow_metadata_search=None):
+                      allow_metadata_search=None,
+                      role_assignment_mode=None,
+                      regional_endpoints=None):
     if sku is not None:
         Sku = cmd.get_models('Sku')
         instance.sku = Sku(name=sku)
@@ -153,6 +185,12 @@ def acr_update_custom(cmd,
 
     if allow_metadata_search is not None:
         _configure_metadata_search(cmd, instance, allow_metadata_search)
+
+    if role_assignment_mode is not None:
+        _configure_role_assignment_mode(cmd, instance, role_assignment_mode)
+
+    if regional_endpoints is not None:
+        _configure_regional_endpoints(cmd, instance, sku, regional_endpoints)
 
     _handle_network_bypass(cmd, instance, allow_trusted_services)
     _handle_export_policy(cmd, instance, allow_exports)
@@ -216,6 +254,27 @@ def acr_update_set(cmd,
 
     validate_sku_update(cmd, registry.sku.name, parameters.sku)
 
+    # Determine the effective SKU (new SKU if being updated, otherwise current SKU)
+    sku = parameters.sku.name if parameters.sku else registry.sku.name
+
+    RegionalEndpoints = cmd.get_models('RegionalEndpoints')
+    if parameters.regional_endpoints == RegionalEndpoints.ENABLED:
+        # Regional endpoints require Premium SKU, validate registry tier compatibility
+        if sku not in get_premium_sku(cmd):
+            raise CLIError(REGIONAL_ENDPOINTS_NOT_SUPPORTED)
+
+        # Regional endpoints are incompatible with Docker Content Trust (DCT), check for conflicts
+        if registry.policies and registry.policies.trust_policy and registry.policies.trust_policy.status == 'enabled':
+            raise CLIError(REGIONAL_ENDPOINTS_NOT_SUPPORTED_FOR_DCT)
+
+        # Recommend enabling data endpoints for optimal performance when using regional endpoints
+        if registry.data_endpoint_enabled is False:
+            logger.warning(
+                "It is recommended to also enable dedicated data endpoints "
+                "(--enable-data-endpoint) for optimal in-region performance "
+                "when using regional endpoints."
+            )
+
     return client.begin_update(resource_group_name, registry_name, parameters)
 
 
@@ -251,38 +310,60 @@ def acr_show_endpoints(cmd,
                 'endpoint': '*.blob.' + cmd.cli_ctx.cloud.suffixes.storage_endpoint,
             })
 
+    RegionalEndpoints = cmd.get_models('RegionalEndpoints')
+    if registry.regional_endpoints == RegionalEndpoints.ENABLED:
+        info['regionalEndpoints'] = []
+        for host in registry.regional_endpoint_host_names:
+            info['regionalEndpoints'].append({
+                'region': host.split('.')[1],
+                'endpoint': host,
+            })
+
     return info
 
 
 def acr_login(cmd,
               registry_name,
-              resource_group_name=None,  # pylint: disable=unused-argument
+              resource_group_name=None,
               tenant_suffix=None,
               username=None,
               password=None,
-              expose_token=False):
+              expose_token=False,
+              endpoint=None):
     if expose_token:
         if username or password:
             raise CLIError("`--expose-token` cannot be combined with `--username` or `--password`.")
+
+        if endpoint:
+            raise CLIError("`--expose-token` cannot be combined with `--endpoint`.")
 
         login_server, _, password = get_login_credentials(
             cmd=cmd,
             registry_name=registry_name,
             tenant_suffix=tenant_suffix,
             username=username,
-            password=password)
+            password=password,
+            resource_group_name=resource_group_name)
 
-        logger.warning("You can perform manual login using the provided access token below, "
-                       "for example: 'docker login loginServer -u %s -p accessToken'", EMPTY_GUID)
+        logger.warning("Note: The token in both the accessToken and refreshToken fields is "
+                       "an ACR Refresh Token, not an ACR Access Token. This ACR Refresh Token cannot be used "
+                       "directly to authenticate with registry APIs such as pushing/pulling images and listing "
+                       "repositories/tags. This ACR Refresh Token must be subsequently exchanged for an ACR Access."
+                       "Please see https://aka.ms/acr/auth/oauth")
+
+        logger.warning("You can perform manual login using the provided refresh token below, "
+                       "for example: 'docker login loginServer -u %s -p refreshToken'", EMPTY_GUID)
 
         token_info = {
             "loginServer": login_server,
-            "accessToken": password
+            "username": EMPTY_GUID,
+            "accessToken": password,
+            "refreshToken": password
         }
 
         return token_info
 
-    tips = "You may want to use 'az acr login -n {} --expose-token' to get an access token, " \
+    tips = "You may want to use 'az acr login -n {} --expose-token' to get a refresh token, " \
            "which does not require Docker to be installed.".format(registry_name)
 
     from azure.cli.core.util import in_cloud_console
@@ -301,7 +382,8 @@ def acr_login(cmd,
         registry_name=registry_name,
         tenant_suffix=tenant_suffix,
         username=username,
-        password=password)
+        password=password,
+        resource_group_name=resource_group_name)
 
     # warn casing difference caused by ACR normalizing to lower on login_server
     parts = login_server.split('.')
@@ -309,6 +391,34 @@ def acr_login(cmd,
         logger.warning('Uppercase characters are detected in the registry name. When using its server url in '
                        'docker commands, to avoid authentication errors, use all lowercase.')
 
+    if endpoint:
+        registry, _ = get_registry_by_name(cmd.cli_ctx, registry_name, resource_group_name)
+        matching_endpoint = None
+
+        RegionalEndpoints = cmd.get_models('RegionalEndpoints')
+        if registry.regional_endpoints == RegionalEndpoints.ENABLED and registry.regional_endpoint_host_names:
+            # Build the expected regional endpoint prefix: registryname.region.geo.
+            regional_endpoint_prefix = f"{registry_name}.{endpoint}.geo.".lower()
+            matching_endpoint = next(
+                (url for url in registry.regional_endpoint_host_names
+                 if url.lower().strip().startswith(regional_endpoint_prefix)), None)
+
+        if matching_endpoint:
+            logger.warning("Logging in to regional endpoint: %s", matching_endpoint)
+            _perform_registry_login(matching_endpoint, docker_command, username, password)
+        else:
+            raise CLIError(
+                "Regional endpoint for '{}' not found. Aborting login. "
+                "Run 'az acr show-endpoints -n {}' to list available regional endpoints.".format(
+                    endpoint, registry_name)
+            )
+    else:
+        _perform_registry_login(login_server, docker_command, username, password)
+
+    return None
+
+
+def _perform_registry_login(login_server, docker_command, username, password):
     from subprocess import PIPE, Popen
     logger.debug("Invoking '%s login --username %s --password <redacted> %s'",
                  docker_command, username, login_server)
@@ -319,7 +429,7 @@ def acr_login(cmd,
     _, stderr = p.communicate()
     return_code = p.returncode
 
-    if stderr:
+    if stderr or return_code != 0:  # when docker command process returns non-zero
         if b'error storing credentials' in stderr and b'stub received bad data' in stderr \
            and _check_wincred(login_server):
             # Retry once after disabling wincred
@@ -360,6 +470,8 @@ def get_docker_command(is_diagnostics_context=False):
         docker_command = os.getenv('DOCKER_COMMAND')
     else:
         docker_command = 'docker'
+        if not shutil.which('docker') and shutil.which('podman'):
+            docker_command = 'podman'
 
     from subprocess import PIPE, Popen, CalledProcessError
     try:
@@ -369,7 +481,7 @@ def get_docker_command(is_diagnostics_context=False):
         logger.debug("Could not run '%s' command. Exception: %s", docker_command, str(e))
         # The executable may not be discoverable in WSL so retry *.exe once
         try:
-            docker_command = 'docker.exe'
+            docker_command = f'{docker_command}.exe'
             p = Popen([docker_command, "ps"], stdout=PIPE, stderr=PIPE)
             _, stderr = p.communicate()
         except OSError as inner:
@@ -607,7 +719,7 @@ def _analyze_identities(identities):
 
 
 def _ensure_identity_resource_id(subscription_id, resource_group, resource):
-    from msrestazure.tools import resource_id, is_valid_resource_id
+    from azure.mgmt.core.tools import resource_id, is_valid_resource_id
     if is_valid_resource_id(resource):
         return resource
     return resource_id(subscription=subscription_id,
@@ -625,3 +737,38 @@ def list_private_link_resources(cmd, client, registry_name, resource_group_name=
 def _configure_metadata_search(cmd, registry, enabled):
     MetadataSearch = cmd.get_models('MetadataSearch')
     registry.metadata_search = (MetadataSearch.enabled if enabled else MetadataSearch.disabled)
+
+
+def _configure_domain_name_label_scope(cmd, registry, scope):
+    registry.auto_generated_domain_name_label_scope = _get_domain_name_label_scope(cmd, scope)
+
+
+def _get_domain_name_label_scope(cmd, scope):
+    if DomainNameLabelScope := cmd.get_models('AutoGeneratedDomainNameLabelScope'):
+        return DomainNameLabelScope(scope).value
+    return DOMAIN_NAME_LABEL_SCOPE_UNSECURE
+
+
+def _configure_role_assignment_mode(cmd, registry, role_assignment_mode):
+    RoleAssignmentMode = cmd.get_models('RoleAssignmentMode')
+    mode = RoleAssignmentMode.LEGACY_REGISTRY_PERMISSIONS
+    if role_assignment_mode == AbacRoleAssignmentMode.ABAC.value:
+        mode = RoleAssignmentMode.ABAC_REPOSITORY_PERMISSIONS
+        logger.warning(
+            "Warning: You have successfully updated the registry authentication mode to enable RBAC "
+            "Registry + ABAC Repository Permissions. ACR Tasks within the registry that do not have "
+            "an assigned identity for source registry access will not have data plane access to the "
+            "registry. To configure source registry data plane access for your existing Tasks, you "
+            "must explicitly assign an Entra identity for accessing the source registry using the "
+            "'--source-registry-auth-id' flag in 'az acr task update'. Please refer to "
+            "https://aka.ms/acr/auth/abac for more details.")
+    registry.role_assignment_mode = mode
+
+
+def _configure_regional_endpoints(cmd, registry, sku, regional_endpoints):
+    RegionalEndpoints = cmd.get_models('RegionalEndpoints')
+
+    if regional_endpoints == RegionalEndpoints.ENABLED and sku and sku not in get_premium_sku(cmd):
+        raise CLIError(REGIONAL_ENDPOINTS_NOT_SUPPORTED)
+
+    registry.regional_endpoints = regional_endpoints

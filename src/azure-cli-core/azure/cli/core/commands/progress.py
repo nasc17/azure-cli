@@ -2,10 +2,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License. See License.txt in the project root for license information.
 # --------------------------------------------------------------------------------------------
-from __future__ import division
 import sys
-
-from humanfriendly.terminal.spinners import Spinner
 
 BAR_LEN = 70
 EMPTY_LINE = ' ' * BAR_LEN
@@ -105,7 +102,7 @@ class ProgressHook:
 class IndeterminateStandardOut(ProgressViewBase):
     """ custom output for progress reporting """
     def __init__(self, out=None, spinner=None):
-        super(IndeterminateStandardOut, self).__init__(
+        super().__init__(
             out if out else sys.stderr)
         self.spinner = spinner
 
@@ -115,6 +112,7 @@ class IndeterminateStandardOut(ProgressViewBase):
         :param args: dictionary containing key 'message'
         """
         if self.spinner is None:
+            from humanfriendly.terminal.spinners import Spinner
             self.spinner = Spinner(  # pylint: disable=no-member
                 label='In Progress', stream=self.out, hide_cursor=False)
         msg = args.get('message', 'In Progress')
@@ -144,7 +142,7 @@ def _format_value(msg, percent):
 class DeterminateStandardOut(ProgressViewBase):
     """ custom output for progress reporting """
     def __init__(self, out=None):
-        super(DeterminateStandardOut, self).__init__(out if out else sys.stderr)
+        super().__init__(out if out else sys.stderr)
 
     def write(self, args):
         """
@@ -179,10 +177,15 @@ class IndeterminateProgressBar:
         self.message = message
         self.hook = self.cli_ctx.get_progress_controller(
             det=False,
-            spinner=Spinner(  # pylint: disable=no-member
-                label='Running',
-                stream=sys.stderr,
-                hide_cursor=False))
+            spinner=self._create_spinner())
+
+    @staticmethod
+    def _create_spinner():
+        from humanfriendly.terminal.spinners import Spinner
+        return Spinner(  # pylint: disable=no-member
+            label='Running',
+            stream=sys.stderr,
+            hide_cursor=False)
 
     def begin(self):
         self.hook.begin()
@@ -192,6 +195,12 @@ class IndeterminateProgressBar:
 
     def update_progress(self):
         self.hook.add(message=self.message)
+
+    def update_progress_with_msg(self, message):
+        if message != "":
+            self.hook.add(message=message)
+        else:
+            self.hook.add(message=self.message)
 
     def end(self):
         self.hook.end()

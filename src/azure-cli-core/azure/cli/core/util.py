@@ -4,21 +4,15 @@
 # --------------------------------------------------------------------------------------------
 # pylint: disable=too-many-lines
 
-import base64
-import binascii
-import getpass
 import json
-import yaml
 import logging
 import os
 import platform
 import re
-import ssl
 import sys
-from urllib.request import urlopen
 
 from knack.log import get_logger
-from knack.util import CLIError, to_snake_case
+from knack.util import CLIError, to_snake_case, to_camel_case
 
 logger = get_logger(__name__)
 
@@ -28,10 +22,10 @@ COMPONENT_PREFIX = 'azure-cli-'
 SSLERROR_TEMPLATE = ('Certificate verification failed. This typically happens when using Azure CLI behind a proxy '
                      'that intercepts traffic with a self-signed certificate. '
                      # pylint: disable=line-too-long
-                     'Please add this certificate to the trusted CA bundle. More info: https://docs.microsoft.com/cli/azure/use-cli-effectively#work-behind-a-proxy.')
+                     'Please add this certificate to the trusted CA bundle. More info: https://learn.microsoft.com/cli/azure/use-cli-effectively#work-behind-a-proxy.')
 
 QUERY_REFERENCE = ("To learn more about --query, please visit: "
-                   "'https://docs.microsoft.com/cli/azure/query-azure-cli'")
+                   "'https://learn.microsoft.com/cli/azure/query-azure-cli'")
 
 
 _PROXYID_RE = re.compile(
@@ -52,14 +46,19 @@ DISALLOWED_USER_NAMES = [
     "sys", "test2", "test3", "user4", "user5"
 ]
 
+# AME Storage Account URL for version checking and VM image aliases (Network Isolation)
+# Files are stored as:
+#   - https://azcliprod.blob.core.windows.net/cli/{package}/setup.py (CLI versions)
+#   - https://azcliprod.blob.core.windows.net/cli/vm/aliases.json (VM image aliases)
+AME_STORAGE_BASE_URL = "https://azcliprod.blob.core.windows.net/cli"
+
 
 def handle_exception(ex):  # pylint: disable=too-many-locals, too-many-statements, too-many-branches
     # For error code, follow guidelines at https://docs.python.org/2/library/sys.html#sys.exit,
     from jmespath.exceptions import JMESPathError
-    from msrestazure.azure_exceptions import CloudError
     from msrest.exceptions import HttpOperationError, ValidationError, ClientRequestError
     from azure.common import AzureException
-    from azure.core.exceptions import AzureError, ServiceRequestError
+    from azure.core.exceptions import AzureError, ServiceRequestError, HttpResponseError
     from requests.exceptions import SSLError, HTTPError
     from azure.cli.core import azclierror
     from msal_extensions.persistence import PersistenceError
@@ -83,7 +82,7 @@ def handle_exception(ex):  # pylint: disable=too-many-locals, too-many-statement
         az_error = azclierror.AzureConnectionError(error_msg)
         az_error.set_recommendation(SSLERROR_TEMPLATE)
 
-    elif isinstance(ex, CloudError):
+    elif isinstance(ex, HttpResponseError):
         if extract_common_error_message(ex):
             error_msg = extract_common_error_message(ex)
         status_code = str(getattr(ex, 'status_code', 'Unknown Code'))
@@ -257,8 +256,8 @@ def is_azure_connection_error(error_msg):
 
 # pylint: disable=inconsistent-return-statements
 def empty_on_404(ex):
-    from msrestazure.azure_exceptions import CloudError
-    if isinstance(ex, CloudError) and ex.status_code == 404:
+    from azure.core.exceptions import HttpResponseError
+    if isinstance(ex, HttpResponseError) and ex.status_code == 404:
         return None
     raise ex
 
@@ -292,14 +291,23 @@ def get_installed_cli_distributions():
     ]
 
 
-def get_latest_from_github(package_path='azure-cli'):
+def get_latest_version_from_ame_storage(package_path='azure-cli'):
+    """Get the latest version from AME Storage Account.
+
+    This replaces get_latest_from_github() due to network isolation requirements.
+    The setup.py files are uploaded to AME Storage Account during release pipeline.
+
+    Args:
+        package_path: Package name, e.g., 'azure-cli', 'azure-cli-core', 'azure-cli-telemetry', 'azure-cli-testsdk'
+    """
     try:
         import requests
-        git_url = "https://raw.githubusercontent.com/Azure/azure-cli/main/src/{}/setup.py".format(package_path)
-        response = requests.get(git_url, timeout=10)
+        storage_url = "{}/{}/setup.py".format(AME_STORAGE_BASE_URL, package_path)
+
+        response = requests.get(storage_url, timeout=10)
         if response.status_code != 200:
             logger.info("Failed to fetch the latest version from '%s' with status code '%s' and reason '%s'",
-                        git_url, response.status_code, response.reason)
+                        storage_url, response.status_code, response.reason)
             return None
         for line in response.iter_lines():
             txt = line.decode('utf-8', errors='ignore')
@@ -308,16 +316,28 @@ def get_latest_from_github(package_path='azure-cli'):
                 if match:
                     return match.group(1)
     except Exception as ex:  # pylint: disable=broad-except
-        logger.info("Failed to get the latest version from '%s'. %s", git_url, str(ex))
+        logger.info("Failed to get the latest version from '%s'. %s", storage_url, str(ex))
         return None
 
 
-def _update_latest_from_github(versions):
-    if not check_connectivity(url='https://raw.githubusercontent.com', max_retries=0):
+def get_latest_from_github(package_path='azure-cli'):
+    """Deprecated: Use get_latest_version_from_ame_storage() instead.
+
+    This function is kept for backward compatibility but now reads from AME Storage Account.
+    """
+    return get_latest_version_from_ame_storage(package_path)
+
+
+def _update_latest_from_ame_storage(versions):
+    """Update versions from AME Storage Account.
+
+    This replaces _update_latest_from_github() due to network isolation requirements.
+    """
+    if not check_connectivity(url=AME_STORAGE_BASE_URL, max_retries=0):
         return versions, False
     success = True
     for pkg in ['azure-cli-core', 'azure-cli-telemetry']:
-        version = get_latest_from_github(pkg)
+        version = get_latest_version_from_ame_storage(pkg)
         if not version:
             success = False
         else:
@@ -327,6 +347,14 @@ def _update_latest_from_github(versions):
     except KeyError:
         pass
     return versions, success
+
+
+def _update_latest_from_github(versions):
+    """Deprecated: Use _update_latest_from_ame_storage() instead.
+
+    This function is kept for backward compatibility but now reads from AME Storage Account.
+    """
+    return _update_latest_from_ame_storage(versions)
 
 
 def get_cached_latest_versions(versions=None):
@@ -344,7 +372,7 @@ def get_cached_latest_versions(versions=None):
             if cache_versions and cache_versions['azure-cli']['local'] == versions['azure-cli']['local']:
                 return cache_versions.copy(), True
 
-    versions, success = _update_latest_from_github(versions)
+    versions, success = _update_latest_from_ame_storage(versions)
     VERSIONS['versions'] = versions
     VERSIONS[_VERSION_UPDATE_TIME] = str(datetime.datetime.now())
     return versions.copy(), success
@@ -364,12 +392,13 @@ def _get_local_versions():
 
 def get_az_version_string(use_cache=False):  # pylint: disable=too-many-statements
     from azure.cli.core.extension import get_extensions, EXTENSIONS_DIR, DEV_EXTENSION_SOURCES, EXTENSIONS_SYS_DIR
+    from azure.cli.core._environment import get_config_dir
     import io
     output = io.StringIO()
     versions = _get_local_versions()
 
     # get the versions from pypi
-    versions, success = get_cached_latest_versions(versions) if use_cache else _update_latest_from_github(versions)
+    versions, success = get_cached_latest_versions(versions) if use_cache else _update_latest_from_ame_storage(versions)
     updates_available_components = []
 
     def _print(val=''):
@@ -411,6 +440,7 @@ def get_az_version_string(use_cache=False):  # pylint: disable=too-many-statemen
     _print()
 
     _print("Python location '{}'".format(os.path.abspath(sys.executable)))
+    _print("Config directory '{}'".format(get_config_dir()))
     _print("Extensions directory '{}'".format(EXTENSIONS_DIR))
     if os.path.isdir(EXTENSIONS_SYS_DIR) and os.listdir(EXTENSIONS_SYS_DIR):
         _print("Extensions system directory '{}'".format(EXTENSIONS_SYS_DIR))
@@ -533,6 +563,7 @@ def get_file_json(file_path, throw_on_empty=True, preserve_order=False):
 
 
 def get_file_yaml(file_path, throw_on_empty=True):
+    import yaml  # Lazy-load: only needed when parsing YAML files
     content = read_file_content(file_path)
     if not content:
         if throw_on_empty:
@@ -557,6 +588,7 @@ def read_file_content(file_path, allow_binary=False):
 
     if allow_binary:
         try:
+            import base64
             with open(file_path, 'rb') as input_file:
                 logger.debug("attempting to read file %s as binary", file_path)
                 return base64.b64encode(input_file.read()).decode("utf-8")
@@ -588,7 +620,7 @@ def shell_safe_json_parse(json_or_dict_string, preserve_order=False, strict=True
             # Recommendation for all shells
             from azure.cli.core.azclierror import InvalidArgumentValueError
             recommendation = "The provided JSON string may have been parsed by the shell. See " \
-                             "https://docs.microsoft.com/cli/azure/use-cli-effectively#use-quotation-marks-in-arguments"
+                             "https://learn.microsoft.com/cli/azure/use-azure-cli-successfully-quoting#json-strings"
 
             # Recommendation especially for PowerShell
             parent_proc = get_parent_proc_name()
@@ -602,13 +634,26 @@ def shell_safe_json_parse(json_or_dict_string, preserve_order=False, strict=True
 
 def b64encode(s):
     """
-    Encodes a string to base64 on 2.x and 3.x
+    Encodes a string to a base64 string.
     :param str s: latin_1 encoded string
     :return: base64 encoded string
     :rtype: str
     """
+    import base64
     encoded = base64.b64encode(s.encode("latin-1"))
-    return encoded if encoded is str else encoded.decode('latin-1')
+    return encoded.decode('latin-1')
+
+
+def b64decode(s):
+    """
+    Decodes a base64 string to a string.
+    :param str s: latin_1 encoded base64 string
+    :return: decoded string
+    :rtype: str
+    """
+    import base64
+    encoded = base64.b64decode(s.encode("latin-1"))
+    return encoded.decode('latin-1')
 
 
 def b64_to_hex(s):
@@ -618,11 +663,51 @@ def b64_to_hex(s):
     :return: uppercase hex string
     :rtype: str
     """
+    import base64
+    import binascii
     decoded = base64.b64decode(s)
     hex_data = binascii.hexlify(decoded).upper()
     if isinstance(hex_data, bytes):
         return str(hex_data.decode("utf-8"))
     return hex_data
+
+
+def todict(obj, post_processor=None):
+    """
+    Convert an object to a dictionary. Use 'post_processor(original_obj, dictionary)' to update the
+    dictionary in the process
+    """
+    from datetime import date, time, datetime, timedelta
+    from enum import Enum
+    from azure.core.serialization import attribute_list, get_backcompat_attr_name
+    if isinstance(obj, dict):
+        result = {k: todict(v, post_processor) for (k, v) in obj.items()}
+        return post_processor(obj, result) if post_processor else result
+    if isinstance(obj, list):
+        return [todict(a, post_processor) for a in obj]
+    if isinstance(obj, Enum):
+        return obj.value
+    if isinstance(obj, (date, time, datetime)):
+        return obj.isoformat()
+    if isinstance(obj, timedelta):
+        return str(obj)
+    # This is the only difference with knack.util.todict because for typespec generated SDKs
+    # The base model stores data in obj.__dict__['_data'] instead of in obj.__dict__
+    # The way to detect if it's a typespec generated model is to check the private `_is_model` attribute
+    # azure-core provided new function `attribute_list` to list all attribute names
+    # so that we don't need to use raw __dict__ directly
+    if getattr(obj, "_is_model", False):
+        result = {to_camel_case(get_backcompat_attr_name(obj, attr)): todict(getattr(obj, attr), post_processor)
+                  for attr in attribute_list(obj) if hasattr(obj, attr)}
+        return post_processor(obj, result) if post_processor else result
+    if hasattr(obj, '_asdict'):
+        return todict(obj._asdict(), post_processor)
+    if hasattr(obj, '__dict__'):
+        result = {to_camel_case(k): todict(v, post_processor)
+                  for k, v in obj.__dict__.items()
+                  if not callable(v) and not k.startswith('_')}
+        return post_processor(obj, result) if post_processor else result
+    return obj
 
 
 def random_string(length=16, force_lower=False, digits_only=False):
@@ -676,11 +761,10 @@ def should_disable_connection_verify():
 
 
 def poller_classes():
-    from msrestazure.azure_operation import AzureOperationPoller
     from msrest.polling.poller import LROPoller
     from azure.core.polling import LROPoller as AzureCoreLROPoller
     from azure.cli.core.aaz._poller import AAZLROPoller
-    return (AzureOperationPoller, LROPoller, AzureCoreLROPoller, AAZLROPoller)
+    return (LROPoller, AzureCoreLROPoller, AAZLROPoller)
 
 
 def augment_no_wait_handler_args(no_wait_enabled, handler, handler_args):
@@ -717,10 +801,11 @@ def open_page_in_browser(url):
 
     if is_wsl():   # windows 10 linux subsystem
         try:
-            # https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_powershell_exe
+            # https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_powershell_exe
             # Ampersand (&) should be quoted
+            safe_url = url.replace("'", "''")
             return subprocess.Popen(
-                ['powershell.exe', '-NoProfile', '-Command', 'Start-Process "{}"'.format(url)]).wait()
+                ['powershell.exe', '-NoProfile', '-Command', f"Start-Process '{safe_url}'"]).wait()
         except OSError:  # WSL might be too old  # FileNotFoundError introduced in Python 3
             pass
     elif platform_name == 'darwin':
@@ -752,6 +837,11 @@ def is_wsl():
 def is_windows():
     platform_name, _ = _get_platform_info()
     return platform_name == 'windows'
+
+
+def is_github_codespaces():
+    # https://docs.github.com/en/codespaces/developing-in-a-codespace/default-environment-variables-for-your-codespace
+    return os.environ.get('CODESPACES') == 'true'
 
 
 def can_launch_browser():
@@ -793,6 +883,7 @@ def reload_module(module):
 
 def get_default_admin_username():
     try:
+        import getpass
         username = getpass.getuser()
     except KeyError:
         username = None
@@ -1110,16 +1201,12 @@ ConfiguredDefaultSetter = ScopedConfig
 
 
 def _ssl_context():
-    if sys.version_info < (3, 4) or (in_cloud_console() and platform.system() == 'Windows'):
-        try:
-            return ssl.SSLContext(ssl.PROTOCOL_TLS)  # added in python 2.7.13 and 3.6
-        except AttributeError:
-            return ssl.SSLContext(ssl.PROTOCOL_TLSv1)
-
+    import ssl
     return ssl.create_default_context()
 
 
 def urlretrieve(url):
+    from urllib.request import urlopen
     req = urlopen(url, context=_ssl_context())
     return req.read()
 
@@ -1248,17 +1335,19 @@ def handle_version_update():
     """
     try:
         from azure.cli.core._session import VERSIONS
-        from packaging.version import parse  # pylint: disable=import-error,no-name-in-module
         from azure.cli.core import __version__
         if not VERSIONS['versions']:
             get_cached_latest_versions()
-        elif parse(VERSIONS['versions']['core']['local']) != parse(__version__):
-            logger.debug("Azure CLI has been updated.")
-            logger.debug("Clean up versions and refresh cloud endpoints information in local files.")
-            VERSIONS['versions'] = {}
-            VERSIONS['update_time'] = ''
-            from azure.cli.core.cloud import refresh_known_clouds
-            refresh_known_clouds()
+        elif VERSIONS['versions']['core']['local'] != __version__:
+            # Lazy import packaging.version
+            from packaging.version import parse  # pylint: disable=import-error,no-name-in-module
+            if parse(VERSIONS['versions']['core']['local']) != parse(__version__):
+                logger.debug("Azure CLI has been updated.")
+                logger.debug("Clean up versions and refresh cloud endpoints information in local files.")
+                VERSIONS['versions'] = {}
+                VERSIONS['update_time'] = ''
+                from azure.cli.core.cloud import refresh_known_clouds
+                refresh_known_clouds()
     except Exception as ex:  # pylint: disable=broad-except
         logger.warning(ex)
 
@@ -1356,3 +1445,50 @@ def should_encrypt_token_cache(cli_ctx):
     encrypt = cli_ctx.config.getboolean('core', 'encrypt_token_cache', fallback=fallback)
 
     return encrypt
+
+
+def run_cmd(args, *, capture_output=False, timeout=None, check=False, encoding=None, env=None):
+    """Run command in a subprocess. It reduces (not eliminates) shell injection by forcing args to be a list
+    and shell=False. Other arguments are keyword-only. For their documentation, see
+    https://docs.python.org/3/library/subprocess.html#subprocess.run
+    """
+    if not isinstance(args, list):
+        from azure.cli.core.azclierror import ArgumentUsageError
+        raise ArgumentUsageError("Invalid args. run_cmd args must be a list")
+
+    import subprocess
+    return subprocess.run(args, capture_output=capture_output, timeout=timeout, check=check,
+                          encoding=encoding, env=env)
+
+
+def run_az_cmd(args, out_file=None):
+    """
+    run_az_cmd would run az related cmds during command execution
+    :param args: cmd to be executed, array of string, like `["az", "version"]`, "az" is optional
+    :param out_file: The file to send output to. file-like object
+    :return: cmd execution result object, containing `result`, `error`, `exit_code`
+    """
+    from azure.cli.core.azclierror import ArgumentUsageError
+    if not isinstance(args, list):
+        raise ArgumentUsageError("Invalid args. run_az_cmd args must be a list")
+    if args[0] == "az":
+        args = args[1:]
+
+    from azure.cli.core import get_default_cli
+    cli = get_default_cli()
+    cli.invoke(args, out_file=out_file)
+    return cli.result
+
+
+def getprop(o, name, *default):
+    """ This function is used to get the property of the object.
+    It will raise an error if the property is a private property or a method.
+    """
+    if name.startswith('_'):
+        # avoid to access the private properties or methods
+        raise AttributeError(name)
+    v = getattr(o, name, *default)
+    if callable(v):
+        # avoid to access the methods
+        raise AttributeError(name)
+    return v

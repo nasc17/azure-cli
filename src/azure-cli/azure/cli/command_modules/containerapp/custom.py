@@ -4,11 +4,12 @@
 # --------------------------------------------------------------------------------------------
 # pylint: disable=line-too-long, consider-using-f-string, logging-format-interpolation, inconsistent-return-statements, broad-except, bare-except, too-many-statements, too-many-locals, too-many-boolean-expressions, too-many-branches, too-many-nested-blocks, pointless-statement, expression-not-assigned, unbalanced-tuple-unpacking, unsupported-assignment-operation
 # pylint: disable=unused-argument, no-else-raise
+from copy import deepcopy
+import json
 import threading
 import sys
 import time
 from urllib.parse import urlparse
-import json
 import requests
 
 
@@ -23,17 +24,18 @@ from azure.cli.core.azclierror import (
     MutuallyExclusiveArgumentError)
 from azure.cli.core.commands.client_factory import get_subscription_id
 from azure.cli.core.util import open_page_in_browser
+from azure.mgmt.core.tools import parse_resource_id, is_valid_resource_id
 from knack.log import get_logger
 from knack.prompting import prompt_y_n, prompt as prompt_str
 
-from msrestazure.tools import parse_resource_id, is_valid_resource_id
 from msrest.exceptions import DeserializationError
 
 from .containerapp_job_decorator import ContainerAppJobDecorator, ContainerAppJobCreateDecorator
 from .containerapp_env_decorator import ContainerAppEnvDecorator, ContainerAppEnvCreateDecorator, ContainerAppEnvUpdateDecorator
 from .containerapp_auth_decorator import ContainerAppAuthDecorator
 from .containerapp_decorator import ContainerAppCreateDecorator, BaseContainerAppDecorator
-from ._client_factory import handle_raw_exception, handle_non_resource_not_found_exception
+from ._client_factory import handle_raw_exception, handle_non_resource_not_found_exception, \
+    handle_non_404_status_code_exception
 from ._clients import (
     ManagedEnvironmentClient,
     ContainerAppClient,
@@ -43,11 +45,11 @@ from ._clients import (
     AuthClient,
     WorkloadProfileClient,
     ContainerAppsJobClient,
+    HttpRouteConfigClient,
     SubscriptionClient
 )
 from ._github_oauth import get_github_access_token
 from ._models import (
-    Ingress as IngressModel,
     JobExecutionTemplate as JobExecutionTemplateModel,
     RegistryCredentials as RegistryCredentialsModel,
     ContainerResources as ContainerResourcesModel,
@@ -80,15 +82,16 @@ from ._utils import (_validate_subscription_registered,
                      ensure_workload_profile_supported, _generate_secret_volume_name,
                      trigger_workflow, AppType,
                      format_location, certificate_location_matches, generate_randomized_managed_cert_name,
-                     check_managed_cert_name_availability, prepare_managed_certificate_envelop)
+                     check_managed_cert_name_availability, prepare_managed_certificate_envelop,
+                     is_acr_url)
 from ._validators import validate_revision_suffix
 from ._ssh_utils import (SSH_DEFAULT_ENCODING, WebSocketConnection, read_ssh, get_stdin_writer, SSH_CTRL_C_MSG,
                          SSH_BACKUP_ENCODING)
-from ._constants import (MAXIMUM_SECRET_LENGTH, MICROSOFT_SECRET_SETTING_NAME, FACEBOOK_SECRET_SETTING_NAME, GITHUB_SECRET_SETTING_NAME,
+from ._constants import (MICROSOFT_SECRET_SETTING_NAME, FACEBOOK_SECRET_SETTING_NAME, GITHUB_SECRET_SETTING_NAME,
                          GOOGLE_SECRET_SETTING_NAME, TWITTER_SECRET_SETTING_NAME, APPLE_SECRET_SETTING_NAME, CONTAINER_APPS_RP,
-                         NAME_INVALID, NAME_ALREADY_EXISTS, ACR_IMAGE_SUFFIX, HELLO_WORLD_IMAGE, LOG_TYPE_SYSTEM, LOG_TYPE_CONSOLE,
+                         NAME_INVALID, NAME_ALREADY_EXISTS, HELLO_WORLD_IMAGE, LOG_TYPE_SYSTEM, LOG_TYPE_CONSOLE,
                          MANAGED_CERTIFICATE_RT, PRIVATE_CERTIFICATE_RT, PENDING_STATUS, SUCCEEDED_STATUS, CONTAINER_APPS_SDK_MODELS,
-                         BLOB_STORAGE_TOKEN_STORE_SECRET_SETTING_NAME)
+                         BLOB_STORAGE_TOKEN_STORE_SECRET_SETTING_NAME, DEFAULT_PORT)
 
 from .containerapp_job_registry_decorator import ContainerAppJobRegistryDecorator, ContainerAppJobRegistrySetDecorator, \
     ContainerAppJobRegistryRemoveDecorator
@@ -143,7 +146,7 @@ def load_yaml_file(file_name):
     try:
         with open(file_name) as stream:  # pylint: disable=unspecified-encoding
             return yaml.safe_load(stream.read().replace('\x00', ''))
-    except (IOError, OSError) as ex:
+    except OSError as ex:
         if getattr(ex, 'errno', 0) == errno.ENOENT:
             raise ValidationError('{} does not exist'.format(file_name)) from ex
         raise
@@ -369,8 +372,8 @@ def update_containerapp_logic(cmd,
     containerapp_def = None
     try:
         containerapp_def = ContainerAppClient.show(cmd=cmd, resource_group_name=resource_group_name, name=name)
-    except:
-        pass
+    except Exception as e:
+        handle_non_404_status_code_exception(e)
 
     if not containerapp_def:
         raise ResourceNotFoundError("The containerapp '{}' does not exist".format(name))
@@ -663,7 +666,7 @@ def update_containerapp_logic(cmd,
 
         if registry_server:
             if not registry_pass or not registry_user:
-                if ACR_IMAGE_SUFFIX not in registry_server:
+                if not is_acr_url(registry_server):
                     raise RequiredArgumentMissingError('Registry url is required if using Azure Container Registry, otherwise Registry username and password are required if using Dockerhub')
                 logger.warning('No credential was provided to access Azure Container Registry. Trying to look up...')
                 parsed = urlparse(registry_server)
@@ -851,6 +854,7 @@ def create_managed_environment(cmd,
                                instrumentation_key=None,
                                dapr_connection_string=None,
                                infrastructure_subnet_resource_id=None,
+                               infrastructure_resource_group=None,
                                docker_bridge_cidr=None,
                                platform_reserved_cidr=None,
                                platform_reserved_dns_ip=None,
@@ -899,6 +903,7 @@ def update_managed_environment(cmd,
                                max_nodes=None,
                                mtls_enabled=None,
                                p2p_encryption_enabled=None,
+                               dapr_connection_string=None,
                                no_wait=False):
     raw_parameters = locals()
     containerapp_env_update_decorator = ContainerAppEnvUpdateDecorator(
@@ -1172,7 +1177,7 @@ def update_containerappsjob_logic(cmd,
 
     update_map = {}
     update_map['replicaConfigurations'] = replica_timeout or replica_retry_limit
-    update_map['triggerConfigurations'] = replica_completion_count or parallelism or cron_expression or scale_rule_name or scale_rule_type or scale_rule_auth or polling_interval or min_executions or max_executions
+    update_map['triggerConfigurations'] = replica_completion_count or parallelism or cron_expression or scale_rule_name or scale_rule_type or scale_rule_auth or polling_interval or min_executions is not None or max_executions is not None
     update_map['container'] = image or container_name or set_env_vars is not None or remove_env_vars is not None or replace_env_vars is not None or remove_all_env_vars or cpu or memory or startup_command is not None or args is not None
     update_map['registry'] = registry_server or registry_user or registry_pass
 
@@ -1397,7 +1402,7 @@ def update_containerappsjob_logic(cmd,
 
         if registry_server:
             if not registry_pass or not registry_user:
-                if ACR_IMAGE_SUFFIX not in registry_server:
+                if not is_acr_url(registry_server):
                     raise RequiredArgumentMissingError('Registry url is required if using Azure Container Registry, otherwise Registry username and password are required if using Dockerhub')
                 logger.warning('No credential was provided to access Azure Container Registry. Trying to look up...')
                 parsed = urlparse(registry_server)
@@ -1551,7 +1556,12 @@ def start_containerappsjob(cmd,
 
     template_def = None
 
-    if image is not None:
+    # Check if any container override parameters are provided
+    has_container_overrides = (image is not None or container_name is not None or
+                               env_vars is not None or startup_command is not None or
+                               args is not None or cpu is not None or memory is not None)
+
+    if has_container_overrides:
         template_def = JobExecutionTemplateModel
         container_def = ContainerModel
         resources_def = None
@@ -1561,7 +1571,11 @@ def start_containerappsjob(cmd,
             resources_def["memory"] = memory
 
         container_def["name"] = container_name if container_name else name
-        container_def["image"] = image if not is_registry_msi_system(registry_identity) else HELLO_WORLD_IMAGE
+
+        # If no image is provided, fetch the existing job's image
+        if image is not None:
+            container_def["image"] = image if not is_registry_msi_system(registry_identity) else HELLO_WORLD_IMAGE
+
         if env_vars is not None:
             container_def["env"] = parse_env_var_flags(env_vars)
         if startup_command is not None:
@@ -1621,10 +1635,18 @@ def start_containerappjob_execution_yaml(cmd, name, resource_group_name, file_na
 
 def stop_containerappsjob(cmd, resource_group_name, name, job_execution_name=None, execution_name_list=None):
     try:
+        # todo: remove execution_name_list in future and allow calling with or without job_execution_name
         if execution_name_list is not None:
-            execution_name_list = execution_name_list.split(",")
-            execution_name_list = json.dumps({'jobExecutionName': execution_name_list})
-        return ContainerAppsJobClient.stop_job(cmd=cmd, resource_group_name=resource_group_name, name=name, job_execution_name=job_execution_name, job_execution_names=execution_name_list)
+            return "--execution-name-list is deprecated. Please use --job-execution-name instead."
+
+        r = ContainerAppsJobClient.stop_job(cmd=cmd, resource_group_name=resource_group_name, name=name, job_execution_name=job_execution_name)
+
+        # if stop is called for a single job execution, return generic response else return the response
+        if job_execution_name:
+            return "Job Execution: " + job_execution_name + ", stopped successfully."
+
+        # else return the response
+        return r
     except CLIError as e:
         handle_raw_exception(e)
 
@@ -1989,7 +2011,7 @@ def create_or_update_github_action(cmd,
     # Registry
     if registry_username is None or registry_password is None:
         # If registry is Azure Container Registry, we can try inferring credentials
-        if not registry_url or ACR_IMAGE_SUFFIX not in registry_url:
+        if not registry_url or not is_acr_url(registry_url):
             raise RequiredArgumentMissingError('Registry url is required if using Azure Container Registry, otherwise Registry username and password are required if using Dockerhub')
         logger.warning('No credential was provided to access Azure Container Registry. Trying to look up...')
         parsed = urlparse(registry_url)
@@ -2417,7 +2439,7 @@ def show_ingress(cmd, name, resource_group_name):
         raise ValidationError("The containerapp '{}' does not have ingress enabled.".format(name)) from e
 
 
-def enable_ingress(cmd, name, resource_group_name, type, target_port, transport="auto", exposed_port=None, allow_insecure=False, disable_warnings=False, no_wait=False):  # pylint: disable=redefined-builtin
+def enable_ingress(cmd, name, resource_group_name, type, target_port=None, transport="auto", exposed_port=None, allow_insecure=False, disable_warnings=False, no_wait=False):  # pylint: disable=redefined-builtin
     _validate_subscription_registered(cmd, CONTAINER_APPS_RP)
 
     containerapp_def = None
@@ -2429,6 +2451,8 @@ def enable_ingress(cmd, name, resource_group_name, type, target_port, transport=
     if not containerapp_def:
         raise ResourceNotFoundError("The containerapp '{}' does not exist".format(name))
 
+    new_containerapp_def = {}
+
     external_ingress = None
     if type is not None:
         if type.lower() == "internal":
@@ -2436,22 +2460,23 @@ def enable_ingress(cmd, name, resource_group_name, type, target_port, transport=
         elif type.lower() == "external":
             external_ingress = True
 
-    ingress_def = None
-    if target_port is not None and type is not None:
-        ingress_def = IngressModel
+    if type is not None:
+        ingress_def = {}
         ingress_def["external"] = external_ingress
-        ingress_def["targetPort"] = target_port
         ingress_def["transport"] = transport
         ingress_def["allowInsecure"] = allow_insecure
         ingress_def["exposedPort"] = exposed_port if transport == "tcp" else None
 
-    containerapp_def["properties"]["configuration"]["ingress"] = ingress_def
+        if target_port is not None:
+            ingress_def["targetPort"] = target_port
+        else:
+            ingress_def["targetPort"] = DEFAULT_PORT
 
-    _get_existing_secrets(cmd, resource_group_name, name, containerapp_def)
+        safe_set(new_containerapp_def, "properties", "configuration", "ingress", value=ingress_def)
 
     try:
-        r = ContainerAppClient.create_or_update(
-            cmd=cmd, resource_group_name=resource_group_name, name=name, container_app_envelope=containerapp_def, no_wait=no_wait)
+        r = ContainerAppClient.update(
+            cmd=cmd, resource_group_name=resource_group_name, name=name, container_app_envelope=new_containerapp_def, no_wait=no_wait)
         not disable_warnings and logger.warning("\nIngress enabled. Access your app at https://{}/\n".format(r["properties"]["configuration"]["ingress"]["fqdn"]))
         return r["properties"]["configuration"]["ingress"]
     except Exception as e:
@@ -2881,9 +2906,10 @@ def show_registry(cmd, name, resource_group_name, server):
 
     registries_def = containerapp_def["properties"]["configuration"]["registries"]
 
-    for r in registries_def:
-        if r['server'].lower() == server.lower():
-            return r
+    if registries_def is not None:
+        for r in registries_def:
+            if r['server'].lower() == server.lower():
+                return r
     raise InvalidArgumentValueError("The containerapp {} does not have specified registry assigned.".format(name))
 
 
@@ -2928,7 +2954,7 @@ def set_registry(cmd, name, resource_group_name, server, username=None, password
 
     if (not username or not password) and not identity:
         # If registry is Azure Container Registry, we can try inferring credentials
-        if ACR_IMAGE_SUFFIX not in server:
+        if not is_acr_url(server):
             raise RequiredArgumentMissingError('Registry username and password are required if you are not using Azure Container Registry.')
         not disable_warnings and logger.warning('No credential was provided to access Azure Container Registry. Trying to look up...')
         parsed = urlparse(server)
@@ -3125,14 +3151,6 @@ def set_secrets(cmd, name, resource_group_name, secrets,
                 no_wait=False):
     _validate_subscription_registered(cmd, CONTAINER_APPS_RP)
 
-    for s in secrets:
-        if s:
-            parsed = s.split("=")
-            if parsed:
-                if len(parsed[0]) > MAXIMUM_SECRET_LENGTH and not disable_max_length:
-                    raise ValidationError(f"Secret names cannot be longer than {MAXIMUM_SECRET_LENGTH}. "
-                                          f"Please shorten {parsed[0]}")
-
     # if not yaml and not secrets:
     #     raise RequiredArgumentMissingError('Usage error: --secrets is required if not using --yaml')
 
@@ -3253,14 +3271,6 @@ def set_secrets_job(cmd, name, resource_group_name, secrets,
                     disable_max_length=False,
                     no_wait=False):
     _validate_subscription_registered(cmd, CONTAINER_APPS_RP)
-
-    for s in secrets:
-        if s:
-            parsed = s.split("=")
-            if parsed:
-                if len(parsed[0]) > MAXIMUM_SECRET_LENGTH and not disable_max_length:
-                    raise ValidationError(f"Secret names cannot be longer than {MAXIMUM_SECRET_LENGTH}. "
-                                          f"Please shorten {parsed[0]}")
 
     containerappjob_def = None
     try:
@@ -3593,9 +3603,10 @@ def stream_containerapp_logs(cmd, resource_group_name, name, container=None, rev
     for line in resp.iter_lines():
         if line:
             logger.info("received raw log line: %s", line)
-            # these .replaces are needed to display color/quotations properly
-            # for some reason the API returns garbled unicode special characters (may need to add more in the future)
-            print(line.decode("utf-8").replace("\\u0022", "\u0022").replace("\\u001B", "\u001B").replace("\\u002B", "\u002B").replace("\\u0027", "\u0027"))
+            if output_format == "json":
+                print(json.dumps(json.loads(line)))
+            else:
+                print(line.decode("utf-8"))
 
 
 def stream_environment_logs(cmd, resource_group_name, name, follow=False, tail=None):
@@ -3689,11 +3700,6 @@ def containerapp_up(cmd,
     if image and HELLOWORLD in image.lower():
         ingress = "external" if not ingress else ingress
         target_port = 80 if not target_port else target_port
-
-    if image:
-        if ingress and not target_port:
-            target_port = 80
-            logger.warning("No ingress provided, defaulting to port 80. Try `az containerapp up --ingress %s --target-port <port>` to set a custom port.", ingress)
 
     if source and not _has_dockerfile(source, dockerfile):
         pass
@@ -3951,7 +3957,7 @@ def upload_ssl(cmd, resource_group_name, name, environment, certificate_file, ho
         cert = upload_certificate(cmd, env_name, resource_group_name, certificate_file, certificate_name, certificate_password, location)
     cert_id = cert["id"]
 
-    new_domain = ContainerAppCustomDomainModel
+    new_domain = deepcopy(ContainerAppCustomDomainModel)
     new_domain["name"] = hostname
     new_domain["certificateId"] = cert_id
     new_custom_domains.append(new_domain)
@@ -4030,7 +4036,7 @@ def bind_hostname_logic(cmd, resource_group_name, name, hostname, thumbprint=Non
 
     custom_domains = get_custom_domains(cmd, resource_group_name, name, location, environment)
     new_custom_domains = list(filter(lambda c: safe_get(c, "name", default=[]) != standardized_hostname, custom_domains))
-    new_domain = ContainerAppCustomDomainModel
+    new_domain = deepcopy(ContainerAppCustomDomainModel)
     new_domain["name"] = standardized_hostname
     new_domain["certificateId"] = cert_id
     new_custom_domains.append(new_domain)
@@ -4045,7 +4051,7 @@ def add_hostname(cmd, resource_group_name, name, hostname, location=None):
     existing_hostname = list(filter(lambda c: safe_get(c, "name", default=[]) == standardized_hostname, custom_domains))
     if len(existing_hostname) > 0:
         raise InvalidArgumentValueError("'{standardized_hostname}' already exists in container app '{name}'.")
-    new_domain = ContainerAppCustomDomainModel
+    new_domain = deepcopy(ContainerAppCustomDomainModel)
     new_domain["name"] = standardized_hostname
     new_domain["bindingType"] = "Disabled"
     custom_domains.append(new_domain)
@@ -5030,27 +5036,37 @@ def set_workload_profile(cmd, resource_group_name, env_name, workload_profile_na
     return update_managed_environment(cmd, env_name, resource_group_name, workload_profile_type=workload_profile_type, workload_profile_name=workload_profile_name, min_nodes=min_nodes, max_nodes=max_nodes)
 
 
-def add_workload_profile(cmd, resource_group_name, env_name, workload_profile_name, workload_profile_type=None, min_nodes=None, max_nodes=None):
+def add_workload_profile(cmd, resource_group_name, env_name, workload_profile_name=None, workload_profile_type=None, min_nodes=None, max_nodes=None):
+    r = None
     try:
         r = ManagedEnvironmentClient.show(cmd=cmd, resource_group_name=resource_group_name, name=env_name)
     except CLIError as e:
         handle_raw_exception(e)
 
+    if r and safe_get(r, "properties", "workloadProfiles") is None:
+        raise ValidationError("Cannot add workload profile because the environment doesn't enable workload profile.\n"
+                              "If you want to use Consumption and Dedicated environment, please create a new one with 'az containerapp env create'.")
+
     workload_profiles = r["properties"]["workloadProfiles"]
 
     workload_profiles_lower = [p["name"].lower() for p in workload_profiles]
 
-    if workload_profile_name.lower() in workload_profiles_lower:
+    if workload_profile_name and workload_profile_name.lower() in workload_profiles_lower:
         raise ValidationError(f"Cannot add workload profile with name {workload_profile_name} because it already exists in this environment")
 
     return update_managed_environment(cmd, env_name, resource_group_name, workload_profile_type=workload_profile_type, workload_profile_name=workload_profile_name, min_nodes=min_nodes, max_nodes=max_nodes)
 
 
 def update_workload_profile(cmd, resource_group_name, env_name, workload_profile_name, min_nodes=None, max_nodes=None):
+    r = None
     try:
         r = ManagedEnvironmentClient.show(cmd=cmd, resource_group_name=resource_group_name, name=env_name)
     except CLIError as e:
         handle_raw_exception(e)
+
+    if r and safe_get(r, "properties", "workloadProfiles") is None:
+        raise ValidationError("Cannot update workload profile because the environment doesn't enable workload profile.\n"
+                              "If you want to use Consumption and Dedicated environment, please create a new one with 'az containerapp env create'.")
 
     workload_profiles = r["properties"]["workloadProfiles"]
 
@@ -5083,5 +5099,162 @@ def delete_workload_profile(cmd, resource_group_name, env_name, workload_profile
             cmd=cmd, resource_group_name=resource_group_name, name=env_name, managed_environment_envelope=managed_env_def)
 
         return r
+    except Exception as e:
+        handle_raw_exception(e)
+
+
+def create_http_route_config(cmd, resource_group_name, name, http_route_config_name, yaml):
+    _validate_subscription_registered(cmd, CONTAINER_APPS_RP)
+    yaml_http_route_config = load_yaml_file(yaml)
+    # check if the type is dict
+    if not isinstance(yaml_http_route_config, dict):
+        raise ValidationError('Invalid YAML provided. Please see https://aka.ms/azure-container-apps-yaml for a valid YAML spec.')
+
+    http_route_config_envelope = {"properties": yaml_http_route_config}
+
+    try:
+        return HttpRouteConfigClient.create(cmd, resource_group_name, name, http_route_config_name, http_route_config_envelope)
+    except Exception as e:
+        handle_raw_exception(e)
+
+
+def update_http_route_config(cmd, resource_group_name, name, http_route_config_name, yaml):
+    _validate_subscription_registered(cmd, CONTAINER_APPS_RP)
+    yaml_http_route_config = load_yaml_file(yaml)
+    # check if the type is dict
+    if not isinstance(yaml_http_route_config, dict):
+        raise ValidationError('Invalid YAML provided. Please see https://aka.ms/azure-container-apps-yaml for a valid YAML spec.')
+
+    http_route_config_envelope = {"properties": yaml_http_route_config}
+
+    try:
+        return HttpRouteConfigClient.update(cmd, resource_group_name, name, http_route_config_name, http_route_config_envelope)
+    except Exception as e:
+        handle_raw_exception(e)
+
+
+def list_http_route_configs(cmd, resource_group_name, name):
+    _validate_subscription_registered(cmd, CONTAINER_APPS_RP)
+    try:
+        return HttpRouteConfigClient.list(cmd, resource_group_name, name)
+    except Exception as e:
+        handle_raw_exception(e)
+
+
+def show_http_route_config(cmd, resource_group_name, name, http_route_config_name):
+    _validate_subscription_registered(cmd, CONTAINER_APPS_RP)
+    try:
+        return HttpRouteConfigClient.show(cmd, resource_group_name, name, http_route_config_name)
+    except Exception as e:
+        handle_raw_exception(e)
+
+
+def delete_http_route_config(cmd, resource_group_name, name, http_route_config_name):
+    _validate_subscription_registered(cmd, CONTAINER_APPS_RP)
+    try:
+        return HttpRouteConfigClient.delete(cmd, resource_group_name, name, http_route_config_name)
+    except Exception as e:
+        handle_raw_exception(e)
+
+
+def show_environment_premium_ingress(cmd, name, resource_group_name):
+    _validate_subscription_registered(cmd, CONTAINER_APPS_RP)
+
+    try:
+        env = ManagedEnvironmentClient.show(cmd, resource_group_name, name)
+        ingress_config = safe_get(env, "properties", "ingressConfiguration")
+        if not ingress_config:
+            return {"message": "No premium ingress configuration found for this environment, using default values."}
+
+        return ingress_config
+    except Exception as e:
+        handle_raw_exception(e)
+
+
+def add_environment_premium_ingress(cmd, name, resource_group_name, workload_profile_name, termination_grace_period=None, request_idle_timeout=None, header_count_limit=None, no_wait=False):
+    _validate_subscription_registered(cmd, CONTAINER_APPS_RP)
+
+    try:
+        ManagedEnvironmentClient.show(cmd, resource_group_name, name)
+        env_patch = {}
+        ingress_config = {}
+        safe_set(env_patch, "properties", "ingressConfiguration", value=ingress_config)
+
+        # Required
+        ingress_config["workloadProfileName"] = workload_profile_name
+        # Optional, remove if None
+        ingress_config["terminationGracePeriodSeconds"] = termination_grace_period
+        ingress_config["requestIdleTimeout"] = request_idle_timeout
+        ingress_config["headerCountLimit"] = header_count_limit
+
+        result = ManagedEnvironmentClient.update(
+            cmd=cmd,
+            resource_group_name=resource_group_name,
+            name=name,
+            managed_environment_envelope=env_patch,
+            no_wait=no_wait
+        )
+
+        return safe_get(result, "properties", "ingressConfiguration")
+
+    except Exception as e:
+        handle_raw_exception(e)
+
+
+def update_environment_premium_ingress(cmd, name, resource_group_name, workload_profile_name=None, termination_grace_period=None, request_idle_timeout=None, header_count_limit=None, no_wait=False):
+    _validate_subscription_registered(cmd, CONTAINER_APPS_RP)
+
+    try:
+        ManagedEnvironmentClient.show(cmd, resource_group_name, name)
+        env_patch = {}
+        ingress_config = {}
+
+        if workload_profile_name is not None:
+            ingress_config["workloadProfileName"] = workload_profile_name
+        if termination_grace_period is not None:
+            ingress_config["terminationGracePeriodSeconds"] = termination_grace_period
+        if request_idle_timeout is not None:
+            ingress_config["requestIdleTimeout"] = request_idle_timeout
+        if header_count_limit is not None:
+            ingress_config["headerCountLimit"] = header_count_limit
+
+        # Only add ingressConfiguration to the patch if any values were specified
+        if ingress_config:
+            safe_set(env_patch, "properties", "ingressConfiguration", value=ingress_config)
+        else:
+            return {"message": "No changes specified for premium ingress configuration"}
+
+        # Update the environment with the patched ingress configuration
+        result = ManagedEnvironmentClient.update(
+            cmd=cmd,
+            resource_group_name=resource_group_name,
+            name=name,
+            managed_environment_envelope=env_patch,
+            no_wait=no_wait
+        )
+
+        return safe_get(result, "properties", "ingressConfiguration")
+
+    except Exception as e:
+        handle_raw_exception(e)
+
+
+def remove_environment_premium_ingress(cmd, name, resource_group_name, no_wait=False):
+    _validate_subscription_registered(cmd, CONTAINER_APPS_RP)
+
+    try:
+        ManagedEnvironmentClient.show(cmd, resource_group_name, name)
+        env_patch = {}
+        # Remove the whole section to restore defaults
+        safe_set(env_patch, "properties", "ingressConfiguration", value=None)
+
+        ManagedEnvironmentClient.update(
+            cmd=cmd,
+            resource_group_name=resource_group_name,
+            name=name,
+            managed_environment_envelope=env_patch,
+            no_wait=no_wait
+        )
+
     except Exception as e:
         handle_raw_exception(e)

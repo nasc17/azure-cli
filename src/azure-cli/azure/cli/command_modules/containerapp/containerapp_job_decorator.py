@@ -21,7 +21,7 @@ from azure.cli.core.commands.client_factory import get_subscription_id
 
 from knack.log import get_logger
 
-from msrestazure.tools import parse_resource_id, is_valid_resource_id
+from azure.mgmt.core.tools import parse_resource_id, is_valid_resource_id
 from msrest.exceptions import DeserializationError
 
 from ._decorator_utils import process_loaded_yaml, load_yaml_file, create_deserializer
@@ -267,15 +267,15 @@ class ContainerAppJobCreateDecorator(ContainerAppJobDecorator):
         if self.get_argument_trigger_type() is not None and self.get_argument_trigger_type().lower() == "manual":
             manualTriggerConfig_def = ManualTriggerModel
             manualTriggerConfig_def[
-                "replicaCompletionCount"] = 0 if self.get_argument_replica_completion_count() is None else self.get_argument_replica_completion_count()
-            manualTriggerConfig_def["parallelism"] = 0 if self.get_argument_parallelism() is None else self.get_argument_parallelism()
+                "replicaCompletionCount"] = self.get_argument_replica_completion_count()
+            manualTriggerConfig_def["parallelism"] = self.get_argument_parallelism()
 
         scheduleTriggerConfig_def = None
         if self.get_argument_trigger_type() is not None and self.get_argument_trigger_type().lower() == "schedule":
             scheduleTriggerConfig_def = ScheduleTriggerModel
             scheduleTriggerConfig_def[
-                "replicaCompletionCount"] = 0 if self.get_argument_replica_completion_count() is None else self.get_argument_replica_completion_count()
-            scheduleTriggerConfig_def["parallelism"] = 0 if self.get_argument_parallelism() is None else self.get_argument_parallelism()
+                "replicaCompletionCount"] = self.get_argument_replica_completion_count()
+            scheduleTriggerConfig_def["parallelism"] = self.get_argument_parallelism()
             scheduleTriggerConfig_def["cronExpression"] = self.get_argument_cron_expression()
 
         eventTriggerConfig_def = None

@@ -8,7 +8,7 @@ import re
 from knack.util import CLIError
 from knack.log import get_logger
 from azure.cli.core.azclierror import FileOperationError, InvalidArgumentValueError
-from ._constants import ACR_NAME_VALIDATION_REGEX
+from ._constants import ACR_NAME_VALIDATION_REGEX, USER_ASSIGNED_IDENTITY_RESOURCE_ID_TEMPLATE
 
 BAD_REPO_FQDN = "The positional parameter 'repo_id' must be a fully qualified repository specifier such"\
                 " as 'myregistry.azurecr.io/hello-world'."
@@ -19,6 +19,8 @@ BAD_MANIFEST_FQDN = "The positional parameter 'manifest_id' must be a fully qual
                     " manifest specifier such as 'myregistry.azurecr.io/hello-world:latest' or"\
                     " 'myregistry.azurecr.io/hello-world@sha256:abc123'."
 BAD_REGISTRY_NAME = "Registry names may contain only alpha numeric characters and must be between 5 and 50 characters"
+INVALID_LOGIN_SERVER_SUFFIX = "The login server suffix is not valid for the current cloud. Please try again using"\
+                              " '{}'."
 
 logger = get_logger(__name__)
 
@@ -104,18 +106,43 @@ def validate_retention_days(namespace):
 
 
 def validate_registry_name(cmd, namespace):
-    """Omit login server endpoint suffix."""
+    """Omit login server endpoint suffix and domain name label (DNL) hash if given."""
     registry = namespace.registry_name
     if registry is None:
         return
     suffixes = cmd.cli_ctx.cloud.suffixes
+
+    # Split registry login server into components ['myregistry-dnlhash', '.azurecr.io']
+    registry_parts = registry.split('.', 1)
+    trimmed_registry_name = registry_parts[0]
+    registry_login_server_suffix = '.' + registry_parts[1] if len(registry_parts) > 1 else ''
+
+    dnl_hash_index = trimmed_registry_name.find("-")
+
+    # Registry name has hyphen but no login server endpoint suffix
+    if registry_login_server_suffix == '' and dnl_hash_index != -1:
+        raise InvalidArgumentValueError(BAD_REGISTRY_NAME)
+
     # Some clouds do not define 'acr_login_server_endpoint' (e.g. AzureGermanCloud)
-    if registry and hasattr(suffixes, 'acr_login_server_endpoint'):
+    if hasattr(suffixes, 'acr_login_server_endpoint'):
         acr_suffix = suffixes.acr_login_server_endpoint
-        pos = registry.find(acr_suffix)
-        if pos > 0:
-            logger.warning("The login server endpoint suffix '%s' is automatically omitted.", acr_suffix)
-            namespace.registry_name = registry[:pos]
+        if registry_login_server_suffix.lower() == acr_suffix and registry_login_server_suffix != '':
+            if dnl_hash_index != -1:
+                removed_suffix = trimmed_registry_name[dnl_hash_index:] + registry_login_server_suffix
+                registry_name = trimmed_registry_name[:dnl_hash_index]
+            else:
+                removed_suffix = registry_login_server_suffix
+                registry_name = trimmed_registry_name
+            logger.warning("Registry name is '%s'. The following suffix '%s' is automatically omitted.",
+                           registry_name,
+                           removed_suffix)
+        else:
+            if registry_login_server_suffix != '':
+                raise InvalidArgumentValueError(INVALID_LOGIN_SERVER_SUFFIX.format(acr_suffix))
+            registry_name = trimmed_registry_name
+        namespace.registry_name = registry_name
+        registry = registry_name
+
     registry = namespace.registry_name
     if not re.match(ACR_NAME_VALIDATION_REGEX, registry):
         raise InvalidArgumentValueError(BAD_REGISTRY_NAME)
@@ -165,3 +192,36 @@ def validate_repository(namespace):
 def validate_docker_file_path(docker_file_path):
     if not os.path.isfile(docker_file_path):
         raise FileOperationError("Unable to find '{}'.".format(docker_file_path))
+
+
+def validate_cache_credentials(namespace):
+    """Validate cache credential options - allow both --identity and --cred-set, but --remove-cred-set is exclusive."""
+    has_identity = namespace.identity is not None
+    has_cred_set = namespace.cred_set is not None
+    has_remove_cred_set = getattr(namespace, 'remove_cred_set', False)
+
+    if has_remove_cred_set and (has_identity or has_cred_set):
+        raise InvalidArgumentValueError(
+            "Cannot specify --remove-cred-set with other credential options. "
+            "Use --remove-cred-set alone to remove credentials."
+        )
+
+    # Validate identity format if provided
+    if has_identity:
+        identity_pattern = (
+            r'^/subscriptions/[^/]+/resource[Gg]roups/[^/]+'
+            r'/providers/Microsoft\.ManagedIdentity'
+            r'/userAssignedIdentities/[^/]+$'
+        )
+
+        if not re.match(identity_pattern, namespace.identity, re.IGNORECASE):
+            example_format = USER_ASSIGNED_IDENTITY_RESOURCE_ID_TEMPLATE.format(
+                sub_id='{subscriptionId}',
+                rg='{resourceGroupName}',
+                identity_name='{identityName}'
+            )
+            raise InvalidArgumentValueError(
+                f"The --identity parameter must be a valid ARM resource ID "
+                f"for a user-assigned managed identity. "
+                f"Format: {example_format}"
+            )

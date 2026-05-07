@@ -46,11 +46,78 @@ Here are the base commands:
 """
 
 
+def _get_tag_plain_text(tag_obj):
+    """Extract plain text from a tag object (typically ColorizedString).
+
+    ColorizedString objects store plain text in _message and add ANSI codes via __str__.
+    For caching, we need plain text only. This function safely extracts it.
+
+    :param tag_obj: Tag object (ColorizedString or other)
+    :return: Plain text string without ANSI codes
+    """
+    # ColorizedString stores plain text in _message attribute
+    if hasattr(tag_obj, '_message'):
+        return tag_obj._message  # pylint: disable=protected-access
+    # Fallback for non-ColorizedString objects
+    return str(tag_obj)
+
+
+def get_help_item_tags(item):
+    """Extract status tags from a help item (group or command).
+
+    Returns a space-separated string of plain text tags like '[Deprecated] [Preview]'.
+    """
+    tags = []
+    if hasattr(item, 'deprecate_info') and item.deprecate_info:
+        tag_obj = item.deprecate_info.tag
+        tags.append(_get_tag_plain_text(tag_obj))
+    if hasattr(item, 'preview_info') and item.preview_info:
+        tag_obj = item.preview_info.tag
+        tags.append(_get_tag_plain_text(tag_obj))
+    if hasattr(item, 'experimental_info') and item.experimental_info:
+        tag_obj = item.experimental_info.tag
+        tags.append(_get_tag_plain_text(tag_obj))
+    return ' '.join(tags)
+
+
+def extract_help_index_data(help_file):
+    """Extract groups and commands from help file children for caching.
+
+    Processes help file children and builds dictionaries of groups and commands
+    with their summaries and tags for top-level help display.
+
+    :param help_file: Help file with loaded children
+    :return: Tuple of (groups_dict, commands_dict)
+    """
+    groups = {}
+    commands = {}
+
+    for child in help_file.children:
+        if hasattr(child, 'name') and hasattr(child, 'short_summary'):
+            child_name = child.name
+            # Only include top-level items (no spaces in name)
+            if ' ' in child_name:
+                continue
+
+            tags = get_help_item_tags(child)
+            item_data = {
+                'summary': child.short_summary,
+                'tags': tags
+            }
+
+            if child.type == 'group':
+                groups[child_name] = item_data
+            else:
+                commands[child_name] = item_data
+
+    return groups, commands
+
+
 # PrintMixin class to decouple printing functionality from AZCLIHelp class.
 # Most of these methods override print methods in CLIHelp
 class CLIPrintMixin(CLIHelp):
     def _print_header(self, cli_name, help_file):
-        super(CLIPrintMixin, self)._print_header(cli_name, help_file)
+        super()._print_header(cli_name, help_file)
 
         links = help_file.links
         if links:
@@ -61,8 +128,7 @@ class CLIPrintMixin(CLIHelp):
 
     def _print_detailed_help(self, cli_name, help_file):
         CLIPrintMixin._print_extensions_msg(help_file)
-        super(CLIPrintMixin, self)._print_detailed_help(cli_name, help_file)
-        self._print_az_find_message(help_file.command)
+        super()._print_detailed_help(cli_name, help_file)
 
     @staticmethod
     def _get_choices_defaults_sources_str(p):
@@ -86,12 +152,6 @@ class CLIPrintMixin(CLIHelp):
                 _print_indent('{0}'.format(e.long_summary), indent)
             _print_indent('{0}'.format(e.command), indent)
             print('')
-
-    @staticmethod
-    def _print_az_find_message(command):
-        indent = 0
-        message = 'To search AI knowledge base for examples, use: az find "az {}"'.format(command)
-        _print_indent(message + '\n', indent)
 
     @staticmethod
     def _process_value_sources(p):
@@ -131,12 +191,11 @@ class CLIPrintMixin(CLIHelp):
 class AzCliHelp(CLIPrintMixin, CLIHelp):
 
     def __init__(self, cli_ctx):
-        super(AzCliHelp, self).__init__(cli_ctx,
-                                        privacy_statement=PRIVACY_STATEMENT,
-                                        welcome_message=WELCOME_MESSAGE,
-                                        command_help_cls=CliCommandHelpFile,
-                                        group_help_cls=CliGroupHelpFile,
-                                        help_cls=CliHelpFile)
+        super().__init__(cli_ctx, privacy_statement=PRIVACY_STATEMENT,
+                         welcome_message=WELCOME_MESSAGE,
+                         command_help_cls=CliCommandHelpFile,
+                         group_help_cls=CliGroupHelpFile,
+                         help_cls=CliHelpFile)
         from knack.help import HelpObject
 
         # TODO: This workaround is used to avoid a bizarre bug in Python 2.7. It
@@ -242,13 +301,181 @@ class AzCliHelp(CLIPrintMixin, CLIHelp):
     def update_examples(help_file):
         pass
 
+    @staticmethod
+    def _colorize_tag(tag_text, enable_color):
+        """Add color to a plain text tag based on its content."""
+        if not enable_color or not tag_text:
+            return tag_text
+
+        from knack.util import color_map
+
+        tag_lower = tag_text.lower()
+        if 'preview' in tag_lower:
+            color = color_map['preview']
+        elif 'experimental' in tag_lower:
+            color = color_map['experimental']
+        elif 'deprecat' in tag_lower:
+            color = color_map['deprecation']
+        else:
+            return tag_text
+
+        return f"{color}{tag_text}{color_map['reset']}"
+
+    @staticmethod
+    def _build_cached_help_items(data, enable_color=False):
+        """Process help items from cache and return list with calculated line lengths."""
+        from knack.help import _get_line_len
+        items = []
+        for name in sorted(data.keys()):
+            item = data[name]
+            plain_tags = item.get('tags', '')
+
+            # Colorize each tag individually if needed
+            if plain_tags and enable_color:
+                # Split multiple tags and colorize each
+                tag_parts = plain_tags.split()
+                colored_tags = ' '.join(AzCliHelp._colorize_tag(tag, enable_color) for tag in tag_parts)
+            else:
+                colored_tags = plain_tags
+
+            tags_len = len(plain_tags)
+            line_len = _get_line_len(name, tags_len)
+            items.append((name, colored_tags, line_len, item.get('summary', '')))
+        return items
+
+    @staticmethod
+    def _print_cached_help_section(items, header, max_line_len):
+        """Display cached help items with consistent formatting."""
+        from knack.help import FIRST_LINE_PREFIX, _get_hanging_indent, _get_padding_len
+        if not items:
+            return
+        print(f"\n{header}")
+        indent = 1
+        LINE_FORMAT = '{name}{padding}{tags}{separator}{summary}'
+        for name, tags, line_len, summary in items:
+            layout = {'line_len': line_len, 'tags': tags}
+            padding = ' ' * _get_padding_len(max_line_len, layout)
+            line = LINE_FORMAT.format(
+                name=name,
+                padding=padding,
+                tags=tags,
+                separator=FIRST_LINE_PREFIX if summary else '',
+                summary=summary
+            )
+            _print_indent(line, indent, _get_hanging_indent(max_line_len, indent))
+
+    def show_cached_help(self, help_data, args=None):
+        """Display help from cached help index without loading modules.
+
+        Args:
+            help_data: Cached help data dictionary
+            args: Original command line args. If empty/None, shows welcome banner.
+        """
+        ran_before = self.cli_ctx.config.getboolean('core', 'first_run', fallback=False)
+        if not ran_before:
+            print(PRIVACY_STATEMENT)
+            self.cli_ctx.config.set_value('core', 'first_run', 'yes')
+
+        if not args:
+            print(WELCOME_MESSAGE)
+
+        print("\nGroup")
+        print("    az")
+
+        groups_data = help_data.get('groups', {})
+        commands_data = help_data.get('commands', {})
+
+        groups_items = self._build_cached_help_items(groups_data, self.cli_ctx.enable_color)
+        commands_items = self._build_cached_help_items(commands_data, self.cli_ctx.enable_color)
+        max_line_len = max(
+            (line_len for _, _, line_len, _ in groups_items + commands_items),
+            default=0
+        )
+
+        self._print_cached_help_section(groups_items, "Subgroups:", max_line_len)
+        self._print_cached_help_section(commands_items, "Commands:", max_line_len)
+        print()
+
+        from azure.cli.core.util import show_updates_available
+        show_updates_available(new_line_after=True)
+
 
 class CliHelpFile(KnackHelpFile):
 
     def __init__(self, help_ctx, delimiters):
         # Each help file (for a command or group) has a version denoting the source of its data.
-        super(CliHelpFile, self).__init__(help_ctx, delimiters)
+        super().__init__(help_ctx, delimiters)
         self.links = []
+
+        from knack.deprecation import resolve_deprecate_info, ImplicitDeprecated, Deprecated
+        from azure.cli.core.breaking_change import UpcomingBreakingChangeTag, MergedStatusTag
+        direct_deprecate_info = None
+        breaking_changes = []
+        deprecate_info = resolve_deprecate_info(help_ctx.cli_ctx, delimiters)
+        if isinstance(deprecate_info, Deprecated):
+            direct_deprecate_info = deprecate_info
+        elif isinstance(deprecate_info, UpcomingBreakingChangeTag):
+            breaking_changes.append(deprecate_info)
+        # If there are more than two `deprecate_info` and/or upcoming breaking changes,
+        # extract them and store separately from the merged status tag.
+        elif isinstance(deprecate_info, MergedStatusTag):
+            depr, bcs = CliHelpFile.classify_merged_status_tag(deprecate_info)
+            direct_deprecate_info = depr[0] if depr else None
+            breaking_changes.extend(bcs)
+
+        # search for implicit deprecation
+        path_comps = delimiters.split()[:-1]
+        implicit_deprecate_info = None
+        while path_comps:
+            deprecate_info = resolve_deprecate_info(help_ctx.cli_ctx, ' '.join(path_comps))
+            if isinstance(deprecate_info, Deprecated) and implicit_deprecate_info is None:
+                implicit_deprecate_info = deprecate_info
+            elif isinstance(deprecate_info, UpcomingBreakingChangeTag):
+                breaking_changes.append(deprecate_info)
+            # If there are more than two `deprecate_info` and/or upcoming breaking changes,
+            # extract them and store separately from the merged status tag.
+            elif isinstance(deprecate_info, MergedStatusTag):
+                depr, bcs = CliHelpFile.classify_merged_status_tag(deprecate_info)
+                if depr and implicit_deprecate_info is None:
+                    implicit_deprecate_info = depr[0]
+                breaking_changes.extend(bcs)
+            del path_comps[-1]
+
+        if implicit_deprecate_info:
+            deprecate_kwargs = implicit_deprecate_info.__dict__.copy()
+            deprecate_kwargs['object_type'] = 'command' if delimiters in \
+                help_ctx.cli_ctx.invocation.commands_loader.command_table else 'command group'
+            del deprecate_kwargs['_get_tag']
+            del deprecate_kwargs['_get_message']
+            self.deprecate_info = ImplicitDeprecated(cli_ctx=help_ctx.cli_ctx, **deprecate_kwargs)
+        else:
+            self.deprecate_info = direct_deprecate_info
+
+        all_deprecate_info = [self.deprecate_info] if self.deprecate_info else []
+        all_deprecate_info.extend(breaking_changes)
+        if len(all_deprecate_info) > 1:
+            # Merge multiple `deprecate_info` and/or breaking changes so their messages can be displayed together.
+            self.deprecate_info = MergedStatusTag(help_ctx.cli_ctx, *all_deprecate_info)
+        elif all_deprecate_info:
+            self.deprecate_info = all_deprecate_info[0]
+
+    @staticmethod
+    def classify_merged_status_tag(merged_status_tag):
+        from knack.deprecation import Deprecated
+        from azure.cli.core.breaking_change import UpcomingBreakingChangeTag, MergedStatusTag
+
+        deprecate_info = []
+        breaking_changes = []
+        for tag in merged_status_tag.tags:
+            if isinstance(tag, Deprecated):
+                deprecate_info.append(tag)
+            elif isinstance(tag, UpcomingBreakingChangeTag):
+                breaking_changes.append(tag)
+            elif isinstance(tag, MergedStatusTag):
+                depr, bcs = CliHelpFile.classify_merged_status_tag(tag)
+                deprecate_info.extend(depr)
+                breaking_changes.extend(bcs)
+        return deprecate_info, breaking_changes
 
     def _should_include_example(self, ex):
         supported_profiles = ex.get('supported-profiles')
@@ -306,7 +533,7 @@ class CliGroupHelpFile(KnackGroupHelpFile, CliHelpFile):
 class CliCommandHelpFile(KnackCommandHelpFile, CliHelpFile):
 
     def __init__(self, help_ctx, delimiters, parser):
-        super(CliCommandHelpFile, self).__init__(help_ctx, delimiters, parser)
+        super().__init__(help_ctx, delimiters, parser)
         self.type = 'command'
         self.command_source = getattr(parser, 'command_source', None)
 
@@ -339,7 +566,7 @@ class CliCommandHelpFile(KnackCommandHelpFile, CliHelpFile):
             param.__class__ = HelpParameter
 
     def _load_from_data(self, data):
-        super(CliCommandHelpFile, self)._load_from_data(data)
+        super()._load_from_data(data)
 
         if isinstance(data, str) or not self.parameters or not data.get('parameters'):
             return
@@ -363,7 +590,7 @@ class ArgumentGroupRegistry(KnackArgumentGroupRegistry):  # pylint: disable=too-
 
     def __init__(self, group_list):
 
-        super(ArgumentGroupRegistry, self).__init__(group_list)
+        super().__init__(group_list)
         self.priorities = {
             None: 0,
             'Resource Id Arguments': 1,
@@ -384,7 +611,7 @@ class HelpExample(KnackHelpExample):  # pylint: disable=too-few-public-methods
         # Old attributes
         _data['name'] = _data.get('name', '')
         _data['text'] = _data.get('text', '')
-        super(HelpExample, self).__init__(_data)
+        super().__init__(_data)
 
         self.name = _data.get('summary', '') if _data.get('summary', '') else self.name
         self.text = _data.get('command', '') if _data.get('command', '') else self.text
@@ -413,11 +640,8 @@ class HelpExample(KnackHelpExample):  # pylint: disable=too-few-public-methods
 
 class HelpParameter(KnackHelpParameter):  # pylint: disable=too-many-instance-attributes
 
-    def __init__(self, **kwargs):
-        super(HelpParameter, self).__init__(**kwargs)
-
     def update_from_data(self, data):
-        super(HelpParameter, self).update_from_data(data)
+        super().update_from_data(data)
         # original help.py value_sources are strings, update command strings to value-source dict
         if self.value_sources:
             self.value_sources = [str_or_dict if isinstance(str_or_dict, dict) else {"link": {"command": str_or_dict}}

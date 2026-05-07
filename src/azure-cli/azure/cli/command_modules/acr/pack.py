@@ -6,14 +6,13 @@
 import base64
 from knack.log import get_logger
 from knack.util import CLIError
-from azure.cli.core.commands import LongRunningOperation
 
 from ._constants import ACR_CACHED_BUILDER_IMAGES
 from ._stream_utils import stream_logs
 from ._utils import (
     get_registry_by_name,
     get_validate_platform,
-    get_custom_registry_credentials
+    get_source_and_custom_registry_credentials
 )
 from ._client_factory import cf_acr_registries_tasks
 from .run import prepare_source_location
@@ -53,8 +52,8 @@ def acr_pack_build(cmd,  # pylint: disable=too-many-locals
     if not source_location:
         raise CLIError('Building with Buildpacks requires a valid source location.')
 
-    platform_os, platform_arch, platform_variant = get_validate_platform(cmd, platform)
-    OS = cmd.get_models('OS', operation_group='task_runs')
+    platform_os, platform_arch, platform_variant = get_validate_platform(platform)
+    from azure.mgmt.containerregistrytasks.models import OS
     if platform_os != OS.linux.value.lower():
         raise CLIError('Building with Buildpacks is only supported on Linux.')
 
@@ -63,7 +62,7 @@ def acr_pack_build(cmd,  # pylint: disable=too-many-locals
 
     registry_prefixes = '$Registry/', registry.login_server + '/'
     # If the image name doesn't have any required prefix, add it
-    if all((not image_name.startswith(prefix) for prefix in registry_prefixes)):
+    if all(not image_name.startswith(prefix) for prefix in registry_prefixes):
         original_image_name = image_name
         image_name = registry_prefixes[0] + image_name
         logger.debug('Modified image name from %s to %s', original_image_name, image_name)
@@ -74,10 +73,7 @@ def acr_pack_build(cmd,  # pylint: disable=too-many-locals
         pack_image_tag=pack_image_tag,
         no_pull='--no-pull' if not pull else '')
 
-    EncodedTaskRunRequest, PlatformProperties = cmd.get_models(
-        'EncodedTaskRunRequest',
-        'PlatformProperties',
-        operation_group='task_runs')
+    from azure.mgmt.containerregistrytasks.models import EncodedTaskRunRequest, PlatformProperties
 
     request = EncodedTaskRunRequest(
         encoded_task_content=base64.b64encode(yaml_body.encode()).decode(),
@@ -88,17 +84,17 @@ def acr_pack_build(cmd,  # pylint: disable=too-many-locals
             architecture=platform_arch,
             variant=platform_variant
         ),
-        credentials=get_custom_registry_credentials(
+        credentials=get_source_and_custom_registry_credentials(
             cmd=cmd,
             auth_mode=auth_mode
         ),
         agent_pool_name=agent_pool_name
     )
 
-    queued = LongRunningOperation(cmd.cli_ctx)(client_registries.begin_schedule_run(
+    queued = client_registries.schedule_run(
         resource_group_name=resource_group_name,
         registry_name=registry_name,
-        run_request=request))
+        run_request=request)
 
     run_id = queued.run_id
     logger.warning('Queued a run with ID: %s', run_id)
@@ -110,6 +106,6 @@ def acr_pack_build(cmd,  # pylint: disable=too-many-locals
 
     if no_logs:
         from ._run_polling import get_run_with_polling
-        return get_run_with_polling(cmd, client, run_id, registry_name, resource_group_name)
+        return get_run_with_polling(client, run_id, registry_name, resource_group_name)
 
     return stream_logs(cmd, client, run_id, registry_name, resource_group_name, timeout, no_format, True)

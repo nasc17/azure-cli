@@ -11,9 +11,8 @@ import os
 
 from knack.log import get_logger
 from knack.util import CLIError
-from azure.cli.core.commands import LongRunningOperation
 
-from ._utils import validate_managed_registry, get_validate_platform, get_custom_registry_credentials
+from ._utils import validate_managed_registry, get_validate_platform, get_source_and_custom_registry_credentials
 from ._stream_utils import stream_logs
 from ._archive_utils import upload_source_code, check_remote_source_code
 
@@ -40,8 +39,9 @@ def acr_build(cmd,  # pylint: disable=too-many-locals
               platform=None,
               target=None,
               auth_mode=None,
-              log_template=None):
-    _, resource_group_name = validate_managed_registry(
+              log_template=None,
+              source_acr_auth_id=None):
+    registry, resource_group_name = validate_managed_registry(
         cmd, registry_name, resource_group_name, BUILD_NOT_SUPPORTED)
 
     from ._client_factory import cf_acr_registries_tasks
@@ -95,12 +95,12 @@ def acr_build(cmd,  # pylint: disable=too-many-locals
 
     is_push_enabled = _get_push_enabled_status(no_push, image_names)
 
-    platform_os, platform_arch, platform_variant = get_validate_platform(cmd, platform)
+    platform_os, platform_arch, platform_variant = get_validate_platform(platform)
 
-    DockerBuildRequest, PlatformProperties = cmd.get_models(
-        'DockerBuildRequest',
-        'PlatformProperties',
-        operation_group='runs')
+    from azure.mgmt.containerregistrytasks.models import DockerBuildRequest, PlatformProperties
+    RoleAssignmentMode = cmd.get_models('RoleAssignmentMode')
+
+    registry_abac_enabled = registry.role_assignment_mode == RoleAssignmentMode.ABAC_REPOSITORY_PERMISSIONS
 
     docker_build_request = DockerBuildRequest(
         agent_pool_name=agent_pool_name,
@@ -116,17 +116,20 @@ def acr_build(cmd,  # pylint: disable=too-many-locals
         timeout=timeout,
         arguments=(arg if arg else []) + (secret_arg if secret_arg else []),
         target=target,
-        credentials=get_custom_registry_credentials(
+        credentials=get_source_and_custom_registry_credentials(
             cmd=cmd,
-            auth_mode=auth_mode
+            auth_mode=auth_mode,
+            source_acr_auth_id=source_acr_auth_id,
+            registry_abac_enabled=registry_abac_enabled,
+            deprecate_auth_mode=True
         ),
         log_template=log_template
     )
 
-    queued = LongRunningOperation(cmd.cli_ctx)(client_registries.begin_schedule_run(
+    queued = client_registries.schedule_run(
         resource_group_name=resource_group_name,
         registry_name=registry_name,
-        run_request=docker_build_request))
+        run_request=docker_build_request)
 
     run_id = queued.run_id
     logger.warning("Queued a build with ID: %s", run_id)
@@ -138,7 +141,7 @@ def acr_build(cmd,  # pylint: disable=too-many-locals
 
     if no_logs:
         from ._run_polling import get_run_with_polling
-        return get_run_with_polling(cmd, client, run_id, registry_name, resource_group_name)
+        return get_run_with_polling(client, run_id, registry_name, resource_group_name)
 
     return stream_logs(cmd, client, run_id, registry_name, resource_group_name, timeout, no_format, True)
 

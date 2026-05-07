@@ -5,6 +5,7 @@
 # pylint: disable=line-too-long, too-many-statements, consider-using-f-string
 
 from knack.arguments import CLIArgumentType
+from knack.deprecation import Deprecated
 
 from azure.cli.core.commands.parameters import (resource_group_name_type,
                                                 get_location_type,
@@ -12,7 +13,7 @@ from azure.cli.core.commands.parameters import (resource_group_name_type,
                                                 get_three_state_flag, get_enum_type, tags_type)
 
 from ._validators import (validate_memory, validate_cpu, validate_managed_env_name_or_id, validate_registry_server,
-                          validate_registry_user, validate_registry_pass, validate_target_port, validate_ingress,
+                          validate_registry_user, validate_registry_pass, validate_target_port,
                           validate_storage_name_or_id, validate_cors_max_age, validate_allow_insecure)
 from ._constants import UNAUTHENTICATED_CLIENT_ACTION, FORWARD_PROXY_CONVENTION, MAXIMUM_CONTAINER_APP_NAME_LENGTH, LOG_TYPE_CONSOLE, LOG_TYPE_SYSTEM
 
@@ -31,7 +32,7 @@ def load_arguments(self, _):
     with self.argument_context('containerapp') as c:
         c.argument('tags', arg_type=tags_type)
         c.argument('managed_env', validator=validate_managed_env_name_or_id, options_list=['--environment'], help="Name or resource ID of the container app's environment.")
-        c.argument('yaml', type=file_type, help='Path to a .yaml file with the configuration of a container app. All other parameters will be ignored. For an example, see  https://docs.microsoft.com/azure/container-apps/azure-resource-manager-api-spec#examples')
+        c.argument('yaml', type=file_type, help='Path to a .yaml file with the configuration of a container app. All other parameters will be ignored. For an example, see  https://learn.microsoft.com/azure/container-apps/azure-resource-manager-api-spec#examples')
 
     with self.argument_context('containerapp exec') as c:
         c.argument('container', help="The name of the container to ssh into")
@@ -87,8 +88,8 @@ def load_arguments(self, _):
         c.argument('scale_rule_name', options_list=['--scale-rule-name', '--srn'], help="The name of the scale rule.")
         c.argument('scale_rule_type', options_list=['--scale-rule-type', '--srt'], help="The type of the scale rule. Default: http. For more information please visit https://learn.microsoft.com/azure/container-apps/scale-app#scale-triggers")
         c.argument('scale_rule_http_concurrency', type=int, options_list=['--scale-rule-http-concurrency', '--srhc', '--srtc', '--scale-rule-tcp-concurrency'], help="The maximum number of concurrent requests before scale out. Only supported for http and tcp scale rules.")
-        c.argument('scale_rule_metadata', nargs="+", options_list=['--scale-rule-metadata', '--srm'], help="Scale rule metadata. Metadata must be in format \"<key>=<value> <key>=<value> ...\".")
-        c.argument('scale_rule_auth', nargs="+", options_list=['--scale-rule-auth', '--sra'], help="Scale rule auth parameters. Auth parameters must be in format \"<triggerParameter>=<secretRef> <triggerParameter>=<secretRef> ...\".")
+        c.argument('scale_rule_metadata', nargs="+", options_list=['--scale-rule-metadata', '--srm'], help="Scale rule metadata. Metadata must be in format \"{key}={value} {key}={value} ...\".")
+        c.argument('scale_rule_auth', nargs="+", options_list=['--scale-rule-auth', '--sra'], help="Scale rule auth parameters. Auth parameters must be in format \"{triggerParameter}={secretRef} {triggerParameter}={secretRef} ...\".")
 
     # Dapr
     with self.argument_context('containerapp', arg_group='Dapr') as c:
@@ -112,7 +113,7 @@ def load_arguments(self, _):
 
     # Ingress
     with self.argument_context('containerapp', arg_group='Ingress') as c:
-        c.argument('ingress', validator=validate_ingress, default=None, arg_type=get_enum_type(['internal', 'external']), help="The ingress type.")
+        c.argument('ingress', default=None, arg_type=get_enum_type(['internal', 'external']), help="The ingress type.")
         c.argument('target_port', type=int, validator=validate_target_port, help="The application port used for ingress traffic.")
         c.argument('transport', arg_type=get_enum_type(['auto', 'http', 'http2', 'tcp']), help="The transport protocol used for ingress traffic.")
         c.argument('exposed_port', type=int, help="Additional exposed port. Only supported by tcp transport protocol. Must be unique per environment if the app ingress is external.")
@@ -156,12 +157,16 @@ def load_arguments(self, _):
         c.argument('storage_account', validator=validate_storage_name_or_id, help="Name or resource ID of the storage account used for Azure Monitor. If this value is provided, Azure Monitor Diagnostic Settings will be created automatically.")
 
     with self.argument_context('containerapp env', arg_group='Dapr') as c:
-        c.argument('instrumentation_key', options_list=['--dapr-instrumentation-key'], help='Application Insights instrumentation key used by Dapr to export Service to Service communication telemetry')
+        c.argument('instrumentation_key', options_list=['--dapr-instrumentation-key'], help='Application Insights instrumentation key used by Dapr to export Service to Service communication telemetry', deprecate_info=c.deprecate(hide=True))
         c.argument('dapr_connection_string', options_list=['--dapr-connection-string', '-d'], help='Application Insights connection string used by Dapr to export service to service communication telemetry.')
+
+    with self.argument_context('containerapp env update', arg_group='Dapr') as c:
+        c.argument('dapr_connection_string', options_list=['--dapr-connection-string', '-d'], help='Application Insights connection string used by Dapr to export service to service communication telemetry. Use "none" to remove it.')
 
     with self.argument_context('containerapp env', arg_group='Virtual Network') as c:
         c.argument('infrastructure_subnet_resource_id', options_list=['--infrastructure-subnet-resource-id', '-s'], help='Resource ID of a subnet for infrastructure components and user app containers.')
-        c.argument('docker_bridge_cidr', options_list=['--docker-bridge-cidr'], help='CIDR notation IP range assigned to the Docker bridge. It must not overlap with any Subnet IP ranges or the IP range defined in Platform Reserved CIDR, if defined')
+        c.argument('infrastructure_resource_group', options_list=['--infrastructure-resource-group', '-i'], help='Name for resource group that will contain infrastructure resources. If not provided, a resource group name will be generated.')
+        c.argument('docker_bridge_cidr', options_list=['--docker-bridge-cidr'], help='CIDR notation IP range assigned to the Docker bridge. It must not overlap with any Subnet IP ranges or the IP range defined in Platform Reserved CIDR, if defined', deprecate_info=Deprecated(self.cli_ctx, target='--docker-bridge-cidr', hide=True, message_func=lambda x: "Option '--docker-bridge-cidr' has been deprecated and will be removed in the Ignite 2024"))
         c.argument('platform_reserved_cidr', options_list=['--platform-reserved-cidr'], help='IP range in CIDR notation that can be reserved for environment infrastructure IP addresses. It must not overlap with any other Subnet IP ranges')
         c.argument('platform_reserved_dns_ip', options_list=['--platform-reserved-dns-ip'], help='An IP address from the IP range defined by Platform Reserved CIDR that will be reserved for the internal DNS server.')
         c.argument('internal_only', arg_type=get_three_state_flag(), options_list=['--internal-only'], help='Boolean indicating the environment only has an internal load balancer. These environments do not have a public static IP resource, therefore must provide infrastructureSubnetResourceId if enabling this property')
@@ -234,7 +239,7 @@ def load_arguments(self, _):
         c.argument('user_assigned', nargs='*', help="Space-separated user identities. If no user identities are specified, all user identities will be removed.")
 
     with self.argument_context('containerapp github-action add') as c:
-        c.argument('repo_url', help='The GitHub repository to which the workflow file will be added. In the format: https://github.com/<owner>/<repository-name>')
+        c.argument('repo_url', help='The GitHub repository to which the workflow file will be added. In the format: `https://github.com/<owner>/<repository-name>`')
         c.argument('token', help='A Personal Access Token with write access to the specified repository. For more information: https://help.github.com/en/github/authenticating-to-github/creating-a-personal-access-token-for-the-command-line')
         c.argument('branch', options_list=['--branch', '-b'], help='The branch of the Github repo. Assumed to be the Github repo\'s default branch if not specified.')
         c.argument('login_with_github', help='Interactively log in with Github to retrieve the Personal Access Token')
@@ -273,7 +278,7 @@ def load_arguments(self, _):
 
     with self.argument_context('containerapp ingress') as c:
         c.argument('allow_insecure', arg_type=get_three_state_flag(), help='Allow insecure connections for ingress traffic.')
-        c.argument('type', validator=validate_ingress, arg_type=get_enum_type(['internal', 'external']), help="The ingress type.")
+        c.argument('type', arg_type=get_enum_type(['internal', 'external']), help="The ingress type.")
         c.argument('transport', arg_type=get_enum_type(['auto', 'http', 'http2', 'tcp']), help="The transport protocol used for ingress traffic.")
         c.argument('target_port', type=int, validator=validate_target_port, help="The application port used for ingress traffic.")
         c.argument('exposed_port', type=int, help="Additional exposed port. Only supported by tcp transport protocol. Must be unique per environment if the app ingress is external.")
@@ -303,7 +308,7 @@ def load_arguments(self, _):
         c.argument('max_age', nargs='?', const='', validator=validate_cors_max_age, help="The maximum age of the allowed origin in seconds. Only postive integer or empty string are allowed. Empty string resets max_age to null.")
 
     with self.argument_context('containerapp secret') as c:
-        c.argument('secrets', nargs='+', options_list=['--secrets', '-s'], help="A list of secret(s) for the container app. Space-separated values in 'key=value' or 'key=keyvaultref:keyvaulturl,identityref:identity' format (where 'key' cannot be longer than 20 characters).")
+        c.argument('secrets', nargs='+', options_list=['--secrets', '-s'], help="A list of secret(s) for the container app. Space-separated values in 'key=value' or 'key=keyvaultref:keyvaulturl,identityref:identity' format (where 'key' cannot be longer than 20 characters. For 'identityref', Use 'system' for a system-defined identity or a resource id for a user-defined identity).")
         c.argument('secret_name', help="The name of the secret to show.")
         c.argument('secret_names', nargs='+', help="A list of secret(s) for the container app. Space-separated secret values names.")
         c.argument('show_values', help='Show the secret values.')
@@ -349,7 +354,7 @@ def load_arguments(self, _):
         c.ignore('no_wait')
 
     with self.argument_context('containerapp up', arg_group='Github Repo') as c:
-        c.argument('repo', help='Create an app via Github Actions. In the format: https://github.com/<owner>/<repository-name> or <owner>/<repository-name>')
+        c.argument('repo', help='Create an app via Github Actions. In the format: `https://github.com/<owner>/<repository-name>` or `<owner>/<repository-name>`')
         c.argument('token', help='A Personal Access Token with write access to the specified repository. For more information: https://help.github.com/en/github/authenticating-to-github/creating-a-personal-access-token-for-the-command-line. If not provided or not found in the cache (and using --repo), a browser page will be opened to authenticate with Github.')
         c.argument('branch', options_list=['--branch', '-b'], help='The branch of the Github repo. Assumed to be the Github repo\'s default branch if not specified.')
         c.argument('context_path', help='Path in the repo from which to run the docker build. Defaults to "./". Dockerfile is assumed to be named "Dockerfile" and in this directory.')
@@ -432,7 +437,7 @@ def load_arguments(self, _):
         c.argument('workload_profile_name', options_list=['--workload-profile-name', '-w'], help='The friendly name for the workload profile')
 
     with self.argument_context('containerapp env workload-profile add') as c:
-        c.argument('workload_profile_type', help="The type of workload profile to add to this environment. Run 'az containerapp env workload-profile list-supported -l <region>' to check the options for your region.")
+        c.argument('workload_profile_type', help="The type of workload profile to add to this environment. Run `az containerapp env workload-profile list-supported -l <region>` to check the options for your region.")
         c.argument('min_nodes', help="The minimum node count for the workload profile")
         c.argument('max_nodes', help="The maximum node count for the workload profile")
 
@@ -445,10 +450,8 @@ def load_arguments(self, _):
         c.argument('name', name_type, metavar='NAME', id_part='name', help=f"The name of the Container Apps Job. A name must consist of lower case alphanumeric characters or '-', start with a letter, end with an alphanumeric character, cannot have '--', and must be less than {MAXIMUM_CONTAINER_APP_NAME_LENGTH} characters.")
         c.argument('cron_expression', help='Cron expression. Only supported for trigger type "Schedule"')
         c.argument('image', help="Container image, e.g. publisher/image-name:tag.")
-        c.argument('replica_completion_count', type=int, options_list=['--replica-completion-count', '--rcc'], help='Number of replicas that need to complete successfully for execution to succeed.')
         c.argument('replica_retry_limit', type=int, help='Maximum number of retries before the replica fails.')
         c.argument('replica_timeout', type=int, help='Maximum number of seconds a replica can execute.')
-        c.argument('parallelism', type=int, help='Maximum number of replicas to run per execution.')
         c.argument('workload_profile_name', options_list=['--workload-profile-name', '-w'], help='The friendly name for the workload profile')
         c.argument('min_executions', type=int, help="Minimum number of job executions that are created for a trigger, default 0.")
         c.argument('max_executions', type=int, help="Maximum number of job executions that are created for a trigger, default 100.")
@@ -458,6 +461,8 @@ def load_arguments(self, _):
         c.argument('system_assigned', options_list=['--mi-system-assigned', c.deprecate(target='--system-assigned', redirect='--mi-system-assigned', hide=True)], help='Boolean indicating whether to assign system-assigned identity.', action='store_true')
         c.argument('trigger_type', help='Trigger type. Schedule | Event | Manual')
         c.argument('user_assigned', options_list=['--mi-user-assigned', c.deprecate(target='--user-assigned', redirect='--mi-user-assigned', hide=True)], nargs='+', help='Space-separated user identities to be assigned.')
+        c.argument('parallelism', type=int, help='Maximum number of replicas to run per execution.', default=1)
+        c.argument('replica_completion_count', type=int, options_list=['--replica-completion-count', '--rcc'], help='Number of replicas that need to complete successfully for execution to succeed.', default=1)
 
     with self.argument_context('containerapp job', arg_group='Scale') as c:
         c.argument('min_executions', type=int, help="Minimum number of job executions to run per polling interval.")
@@ -465,9 +470,13 @@ def load_arguments(self, _):
         c.argument('polling_interval', type=int, help="Interval to check each event source in seconds. Defaults to 30s.")
         c.argument('scale_rule_type', options_list=['--scale-rule-type', '--srt'], help="The type of the scale rule.")
 
+    with self.argument_context('containerapp job update') as c:
+        c.argument('parallelism', type=int, help='Maximum number of replicas to run per execution.')
+        c.argument('replica_completion_count', type=int, options_list=['--replica-completion-count', '--rcc'], help='Number of replicas that need to complete successfully for execution to succeed.')
+
     with self.argument_context('containerapp job stop') as c:
         c.argument('job_execution_name', help='name of the specific job execution which needs to be stopped.')
-        c.argument('execution_name_list', help='comma separated list of job execution names.')
+        c.argument('execution_name_list', help='comma separated list of job execution names.', deprecate_info=Deprecated(self.cli_ctx, target='--execution_name_list', hide=True, message_func=lambda x: "Option 'execution-name-list' has been deprecated and will be removed in the next Cli version"))
 
     with self.argument_context('containerapp job execution') as c:
         c.argument('name', id_part=None)
@@ -496,3 +505,16 @@ def load_arguments(self, _):
 
     with self.argument_context('containerapp job registry list') as c:
         c.argument('name', id_part=None)
+
+    with self.argument_context('containerapp env http-route-config') as c:
+        c.argument('http_route_config_name', options_list=['--http-route-config-name', '-r'], help="The name of the http route configuration.")
+        c.argument('yaml', help="The path to the YAML input file.")
+        c.argument('name', id_part=None)
+
+    with self.argument_context('containerapp env premium-ingress') as c:
+        c.argument('resource_group_name', arg_type=resource_group_name_type, id_part=None)
+        c.argument('name', options_list=['--name', '-n'], help="The name of the managed environment.")
+        c.argument('workload_profile_name', options_list=['--workload-profile-name', '-w'], help="The workload profile to run ingress replicas on. This profile must not be shared with any container app or job.")
+        c.argument('termination_grace_period', options_list=['--termination-grace-period', '-t'], type=int, help="Time in seconds to drain requests during ingress shutdown. Default 500, minimum 0, maximum 3600.")
+        c.argument('request_idle_timeout', type=int, help="Timeout in minutes for idle requests. Default 4, minimum 4, maximum 30.")
+        c.argument('header_count_limit', type=int, help="Limit of http headers per request. Default 100, minimum 1.")

@@ -14,8 +14,10 @@ import re
 import sys
 import time
 import copy
+from collections import OrderedDict
 from importlib import import_module
 
+from azure.cli.core.breaking_change import UpcomingBreakingChangeTag, MergedStatusTag
 # pylint: disable=unused-import
 from azure.cli.core.commands.constants import (
     BLOCKED_MODS, DEFAULT_QUERY_TIME_RANGE, CLI_COMMON_KWARGS, CLI_COMMAND_KWARGS, CLI_PARAM_KWARGS,
@@ -27,16 +29,15 @@ from azure.cli.core.util import (
     get_command_type_kwarg, read_file_content, get_arg_list, poller_classes)
 from azure.cli.core.local_context import LocalContextAction
 from azure.cli.core import telemetry
-from azure.cli.core.commands.progress import IndeterminateProgressBar
 
 from knack.arguments import CLICommandArgument
 from knack.commands import CLICommand, CommandGroup, PREVIEW_EXPERIMENTAL_CONFLICT_ERROR
-from knack.deprecation import ImplicitDeprecated, resolve_deprecate_info
+from knack.deprecation import ImplicitDeprecated, resolve_deprecate_info, Deprecated
 from knack.invocation import CommandInvoker
 from knack.preview import ImplicitPreviewItem, PreviewItem, resolve_preview_info
 from knack.experimental import ImplicitExperimentalItem, ExperimentalItem, resolve_experimental_info
 from knack.log import get_logger, CLILogging
-from knack.util import CLIError, CommandResultItem, todict
+from knack.util import CLIError, CommandResultItem
 from knack.events import EVENT_INVOKER_TRANSFORM_RESULT
 from knack.validators import DefaultStr
 
@@ -93,7 +94,7 @@ def _expand_file_prefixed_files(args):
         if ix == 0:
             try:
                 return _load_file(poss_file)
-            except IOError:
+            except OSError:
                 logger.debug("Failed to load '%s', assume not a file", arg)
                 return arg
 
@@ -253,13 +254,13 @@ class CacheObject:
             payload = object.__getattribute__(self, '_payload')
             return payload.__getattribute__(key)
         except AttributeError:
-            return super(CacheObject, self).__getattribute__(key)
+            return super().__getattribute__(key)
 
     def __setattr__(self, key, value):
         try:
             return self._payload.__setattr__(key, value)
         except AttributeError:
-            return super(CacheObject, self).__setattr__(key, value)
+            return super().__setattr__(key, value)
 
 
 class AzCliCommand(CLICommand):
@@ -267,10 +268,10 @@ class AzCliCommand(CLICommand):
     def __init__(self, loader, name, handler, description=None, table_transformer=None,
                  arguments_loader=None, description_loader=None,
                  formatter_class=None, sensitive_info=None, deprecate_info=None, validator=None, **kwargs):
-        super(AzCliCommand, self).__init__(loader.cli_ctx, name, handler, description=description,
-                                           table_transformer=table_transformer, arguments_loader=arguments_loader,
-                                           description_loader=description_loader, formatter_class=formatter_class,
-                                           deprecate_info=deprecate_info, validator=validator, **kwargs)
+        super().__init__(loader.cli_ctx, name, handler, description=description,
+                         table_transformer=table_transformer, arguments_loader=arguments_loader,
+                         description_loader=description_loader, formatter_class=formatter_class,
+                         deprecate_info=deprecate_info, validator=validator, **kwargs)
         self.loader = loader
         self.command_source = None
         self.sensitive_info = sensitive_info
@@ -297,7 +298,7 @@ class AzCliCommand(CLICommand):
 
         # same blunt mechanism like we handled id-parts, for create command, no name default
         if not (self.name.split()[-1] == 'create' and overrides.settings.get('metavar', None) == 'NAME'):
-            super(AzCliCommand, self)._resolve_default_value_from_config_file(arg, overrides)
+            super()._resolve_default_value_from_config_file(arg, overrides)
 
         self._resolve_default_value_from_local_context(arg, overrides)
 
@@ -316,7 +317,7 @@ class AzCliCommand(CLICommand):
                     overrides.settings['default_value_source'] = 'Local Context'
 
     def load_arguments(self):
-        super(AzCliCommand, self).load_arguments()
+        super().load_arguments()
         if self.arguments_loader:
             cmd_args = self.arguments_loader()
             if self.supports_no_wait or self.no_wait_param:
@@ -469,7 +470,7 @@ def cached_put(cmd_obj, operation, parameters, *args, setter_arg_name='parameter
     obj_path = os.path.join(obj_dir, obj_file)
     try:
         os.remove(obj_path)
-    except (OSError, IOError):  # FileNotFoundError introduced in Python 3
+    except OSError:  # FileNotFoundError introduced in Python 3
         pass
     return result
 
@@ -511,8 +512,12 @@ class AzCliCommandInvoker(CommandInvoker):
         from azure.cli.core.commands.events import (
             EVENT_INVOKER_PRE_CMD_TBL_TRUNCATE, EVENT_INVOKER_PRE_LOAD_ARGUMENTS, EVENT_INVOKER_POST_LOAD_ARGUMENTS)
 
-        # TODO: Can't simply be invoked as an event because args are transformed
         args = _pre_command_table_create(self.cli_ctx, args)
+
+        if self._should_show_cached_help(args):
+            result = self._try_show_cached_help(args)
+            if result:
+                return result
 
         self.cli_ctx.raise_event(EVENT_INVOKER_PRE_CMD_TBL_CREATE, args=args)
         self.commands_loader.load_command_table(args)
@@ -574,6 +579,14 @@ class AzCliCommandInvoker(CommandInvoker):
             self.parser.enable_autocomplete()
             subparser = self.parser.subparsers[tuple()]
             self.help.show_welcome(subparser)
+
+            use_command_index = self._should_use_command_index()
+            logger.debug("About to cache help data, use_command_index=%s", use_command_index)
+            if use_command_index:
+                try:
+                    self._save_help_to_command_index(subparser)
+                except Exception as ex:  # pylint: disable=broad-except
+                    logger.debug("Failed to cache help data: %s", ex)
 
             # TODO: No event in base with which to target
             telemetry.set_command_details('az')
@@ -695,6 +708,81 @@ class AzCliCommandInvoker(CommandInvoker):
         return [(p.split('=', 1)[0] if p.startswith('--') else p[:2]) for p in args if
                 (p.startswith('-') and not p.startswith('---') and len(p) > 1)]
 
+    @staticmethod
+    def _is_top_level_help_request(args):
+        """Determine if this is a top-level help request (az --help or just az).
+
+        Returns True for both 'az' with no args and 'az --help' so we can use
+        cached data without loading all modules.
+        """
+        if not args:
+            return True
+
+        for arg in args:
+            if arg in ('--help', '-h', 'help'):
+                return True
+            if not arg.startswith('-'):
+                return False
+
+        return False
+
+    def _should_use_command_index(self):
+        """Check if command index optimization is enabled."""
+        return self.cli_ctx.config.getboolean('core', 'use_command_index', fallback=True)
+
+    def _should_show_cached_help(self, args):
+        return (self._should_use_command_index() and
+                self._is_top_level_help_request(args) and
+                not self.cli_ctx.data.get('completer_active'))
+
+    def _try_show_cached_help(self, args):
+        """Try to show cached help for top-level help request.
+
+        Returns CommandResultItem if cached help was shown, None otherwise.
+        """
+        from azure.cli.core import CommandIndex, REFRESH_EXTENSION_HELP_OVERLAY_SENTINEL
+        command_index = CommandIndex(self.cli_ctx)
+        help_index = command_index.get_help_index()
+
+        if not help_index and command_index.needs_latest_extension_help_overlay_refresh():
+            logger.debug("Top-level cached help is unavailable on latest profile. "
+                         "Refreshing extension help overlay without full core module load.")
+            try:
+                if self.cli_ctx.invocation.data.get('command_string') is None:
+                    self.cli_ctx.invocation.data['command_string'] = ''
+                # Unknown top-level command forces extension-only load path on latest profile.
+                self.commands_loader.load_command_table([REFRESH_EXTENSION_HELP_OVERLAY_SENTINEL])
+                help_index = command_index.get_help_index()
+            except Exception as ex:  # pylint: disable=broad-except
+                # Keep cached-help refresh best-effort; normal invocation flow can still continue.
+                logger.debug("Failed to refresh latest extension help overlay: %s", ex)
+
+        if help_index:
+            # Display cached help using the help system
+            self.help.show_cached_help(help_index, args)
+            telemetry.set_command_details('az', parameters=['--help'])
+            telemetry.set_success(summary='show help')
+            return CommandResultItem(None, exit_code=0)
+
+        return None
+
+    def _save_help_to_command_index(self, subparser):
+        """Extract help data from parser and save to command index for future fast access."""
+        from azure.cli.core import CommandIndex
+        from azure.cli.core._help import CliGroupHelpFile, extract_help_index_data
+
+        command_index = CommandIndex(self.cli_ctx)
+        help_file = CliGroupHelpFile(self.help, '', subparser)
+        help_file.load(subparser)
+
+        groups, commands = extract_help_index_data(help_file)
+
+        # Store in the command index
+        help_index_data = {'groups': groups, 'commands': commands}
+        if groups or commands:
+            command_index.set_help_index(help_index_data)
+            logger.debug("Cached %d groups and %d commands for fast access", len(groups), len(commands))
+
     def _run_job(self, expanded_arg, cmd_copy):
         params = self._filter_params(expanded_arg)
         try:
@@ -713,6 +801,7 @@ class AzCliCommandInvoker(CommandInvoker):
             elif _is_paged(result):
                 result = list(result)
 
+            from ..util import todict
             result = todict(result, AzCliCommandInvoker.remove_additional_prop_layer)
 
             event_data = {'result': result}
@@ -751,15 +840,36 @@ class AzCliCommandInvoker(CommandInvoker):
         self._resolve_extension_override_warning(cmd)
 
     def _resolve_preview_and_deprecation_warnings(self, cmd, parsed_args):
-        deprecations = [] + getattr(parsed_args, '_argument_deprecations', [])
+        deprecations = getattr(parsed_args, '_argument_deprecations', [])
+        # Handle `always_display` argument breaking changes
+        for _, argument in parsed_args.func.arguments.items():
+            # Some arguments have breaking changes that must always be displayed.
+            # Iterate through them and show the warnings.
+            if isinstance(argument.deprecate_info, UpcomingBreakingChangeTag):
+                if argument.deprecate_info.always_display:
+                    deprecations.append(argument.deprecate_info)
+            elif isinstance(argument.deprecate_info, MergedStatusTag):
+                for deprecation in argument.deprecate_info.tags:
+                    if isinstance(deprecation, UpcomingBreakingChangeTag) and deprecation.always_display:
+                        deprecations.append(deprecation)
+        # Dedup the deprecations
+        # If an argument has multiple breaking changes or deprecations,
+        # duplicated deprecations would be produced due to the inherent logic of action
+        deprecations = list(OrderedDict.fromkeys(deprecations))
         if cmd.deprecate_info:
             deprecations.append(cmd.deprecate_info)
 
         # search for implicit deprecation
         path_comps = cmd.name.split()[:-1]
         implicit_deprecate_info = None
-        while path_comps and not implicit_deprecate_info:
-            implicit_deprecate_info = resolve_deprecate_info(self.cli_ctx, ' '.join(path_comps))
+        while path_comps:
+            deprecate_info = resolve_deprecate_info(self.cli_ctx, ' '.join(path_comps))
+            if isinstance(deprecate_info, Deprecated) and implicit_deprecate_info is None:
+                implicit_deprecate_info = deprecate_info
+            elif isinstance(deprecate_info, UpcomingBreakingChangeTag):
+                deprecations.append(deprecate_info)
+            elif isinstance(deprecate_info, MergedStatusTag):
+                deprecations.extend(deprecate_info.tags)
             del path_comps[-1]
 
         if implicit_deprecate_info:
@@ -806,6 +916,9 @@ class AzCliCommandInvoker(CommandInvoker):
                 experimentals.append(ImplicitExperimentalItem(cli_ctx=self.cli_ctx, **experimental_kwargs))
 
         if not self.cli_ctx.only_show_errors:
+            from azure.cli.core.breaking_change import upcoming_breaking_changes
+            for bc in upcoming_breaking_changes.get('', []):
+                print(bc.message, file=sys.stderr)
             for d in deprecations:
                 print(d.message, file=sys.stderr)
             for p in previews:
@@ -837,7 +950,7 @@ class AzCliCommandInvoker(CommandInvoker):
         from ..credential_helper import distinguish_credential
         from ..telemetry import set_secrets_detected
         try:
-            containing_credential, secret_property_names = distinguish_credential(result)
+            containing_credential, secret_property_names, secret_names = distinguish_credential(result)
             if not containing_credential:
                 set_secrets_detected(False)
                 return
@@ -846,10 +959,10 @@ class AzCliCommandInvoker(CommandInvoker):
             if secret_property_names:
                 message = sensitive_data_detailed_warning_message.format(', '.join(secret_property_names))
             logger.warning(message)
-            set_secrets_detected(True, secret_property_names)
-        except Exception:  # pylint: disable=broad-except
+            set_secrets_detected(True, secret_property_names, secret_names)
+        except Exception as ex:  # pylint: disable=broad-except
             # ignore all exceptions, as this is just a warning
-            pass
+            logger.debug('Scan credentials failed with %s', str(ex))
 
     def resolve_confirmation(self, cmd, parsed_args):
         confirm = cmd.confirmation and not parsed_args.__dict__.pop('yes', None) \
@@ -921,10 +1034,20 @@ class LongRunningOperation:  # pylint: disable=too-few-public-methods
         self.deploy_dict = {}
         self.last_progress_report = datetime.datetime.now()
 
-        self.progress_bar = None
+        self._progress_bar = None
         disable_progress_bar = self.cli_ctx.config.getboolean('core', 'disable_progress_bar', False)
-        if not disable_progress_bar and not cli_ctx.only_show_errors:
-            self.progress_bar = progress_bar if progress_bar is not None else IndeterminateProgressBar(cli_ctx)
+        self.disable_progress_bar = disable_progress_bar or cli_ctx.only_show_errors
+        if not self.disable_progress_bar:
+            self._progress_bar = progress_bar
+
+    @property
+    def progress_bar(self):
+        if self.disable_progress_bar:
+            return None
+        if self._progress_bar is None:
+            from azure.cli.core.commands.progress import IndeterminateProgressBar
+            self._progress_bar = IndeterminateProgressBar(self.cli_ctx)
+        return self._progress_bar
 
     def _delay(self):
         time.sleep(self.poller_done_interval_ms / 1000.0)
@@ -975,10 +1098,10 @@ class LongRunningOperation:  # pylint: disable=too-few-public-methods
 
                     if deploy_values.get('timestamp', None) is None or \
                             event.event_timestamp > deploy_values.get('timestamp'):
-                        for value in checked_values:
-                            if deploy_values.get(checked_values[value], None) != value:
+                        for k, v in checked_values.items():
+                            if deploy_values.get(v, None) != k:
                                 update = True
-                            deploy_values[checked_values[value]] = value
+                            deploy_values[v] = k
                         deploy_values['timestamp'] = event.event_timestamp
 
                         # don't want to show the timestamp
@@ -1027,7 +1150,13 @@ class LongRunningOperation:  # pylint: disable=too-few-public-methods
                     logger.warning('%s during progress reporting: %s', getattr(type(ex), '__name__', type(ex)), ex)
             try:
                 if self.progress_bar:
-                    self.progress_bar.update_progress()
+                    status = ""
+                    # some pollers do not have a status method (eg. AAZLROPoller)
+                    try:
+                        status = poller.status()
+                    except AttributeError:
+                        pass
+                    self.progress_bar.update_progress_with_msg(status)
                 self._delay()
             except KeyboardInterrupt:
                 if self.progress_bar:
@@ -1066,7 +1195,7 @@ class DeploymentOutputLongRunningOperation(LongRunningOperation):
 
         if isinstance(result, poller_classes()):
             # most deployment operations return a poller
-            result = super(DeploymentOutputLongRunningOperation, self).__call__(result)
+            result = super().__call__(result)
             outputs = None
             try:
                 if isinstance(result, str) and result:
@@ -1098,22 +1227,17 @@ def _load_command_loader(loader, args, name, prefix):
             logger.debug("Module '%s' is missing `get_command_loader` entry.", name)
 
     command_table = {}
+    command_loader = None
 
     if loader_cls:
         command_loader = loader_cls(cli_ctx=loader.cli_ctx)
-        loader.loaders.append(command_loader)  # This will be used by interactive
         if command_loader.supported_resource_type():
             command_table = command_loader.load_command_table(args)
-            if command_table:
-                for cmd in list(command_table.keys()):
-                    # TODO: If desired to for extension to patch module, this can be uncommented
-                    # if loader.cmd_to_loader_map.get(cmd):
-                    #    loader.cmd_to_loader_map[cmd].append(command_loader)
-                    # else:
-                    loader.cmd_to_loader_map[cmd] = [command_loader]
     else:
         logger.debug("Module '%s' is missing `COMMAND_LOADER_CLS` entry.", name)
-    return command_table, command_loader.command_group_table
+
+    group_table = command_loader.command_group_table if command_loader else {}
+    return command_table, group_table, command_loader
 
 
 def _load_extension_command_loader(loader, args, ext):
@@ -1128,7 +1252,7 @@ class ExtensionCommandSource:
     """ Class for commands contributed by an extension """
 
     def __init__(self, overrides_command=False, extension_name=None, preview=False, experimental=False):
-        super(ExtensionCommandSource, self).__init__()
+        super().__init__()
         # True if the command overrides a CLI command
         self.overrides_command = overrides_command
         self.extension_name = extension_name
@@ -1191,7 +1315,7 @@ def _is_paged(obj):
 
 def _is_poller(obj):
     # Since loading msrest is expensive, we avoid it until we have to
-    if obj.__class__.__name__ in ['AzureOperationPoller', 'LROPoller', 'AAZLROPoller']:
+    if obj.__class__.__name__ in ['LROPoller', 'AAZLROPoller']:
         return isinstance(obj, poller_classes())
     return False
 
@@ -1234,8 +1358,8 @@ class AzCommandGroup(CommandGroup):
         """
         merged_kwargs = self._merge_kwargs(kwargs, base_kwargs=command_loader.module_kwargs)
         operations_tmpl = merged_kwargs.pop('operations_tmpl', None)
-        super(AzCommandGroup, self).__init__(command_loader, group_name,
-                                             operations_tmpl, **merged_kwargs)
+        super().__init__(command_loader, group_name,
+                         operations_tmpl, **merged_kwargs)
         self.group_kwargs = merged_kwargs
         if operations_tmpl:
             self.group_kwargs['operations_tmpl'] = operations_tmpl
@@ -1267,14 +1391,13 @@ class AzCommandGroup(CommandGroup):
             return arg_source_copy
         return merged_kwargs
 
-    # pylint: disable=arguments-differ
-    def command(self, name, method_name=None, **kwargs):
+    def command(self, name, handler_name=None, **kwargs):
         """
         Register a CLI command.
         :param name: Name of the command as it will be called on the command line
         :type name: str
-        :param method_name: Name of the method the command maps to
-        :type method_name: str
+        :param handler_name: Name of the method the command maps to
+        :type handler_name: str
         :param kwargs: Keyword arguments. Supported keyword arguments include:
             - client_factory: Callable which returns a client needed to access the underlying command method. (function)
             - confirmation: Prompt prior to the action being executed. This is useful if the action
@@ -1291,7 +1414,7 @@ class AzCommandGroup(CommandGroup):
             - max_api: Maximum API version required for commands within the group (string)
         :rtype: None
         """
-        return self._command(name, method_name=method_name, **kwargs)
+        return self._command(name, method_name=handler_name, **kwargs)
 
     def custom_command(self, name, method_name=None, **kwargs):
         """

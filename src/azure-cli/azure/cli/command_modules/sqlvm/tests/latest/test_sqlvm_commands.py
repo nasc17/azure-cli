@@ -36,7 +36,7 @@ class SqlVirtualMachinePreparer(AbstractPreparer, SingleValueReplacer):
                  vm_user='admin123', vm_password='SecretPassword123', parameter_name='sqlvm',
                  resource_group_parameter_name='resource_group', skip_delete=True,
                  image='microsoftsqlserver:sql2019-ws2022:enterprise:latest'):
-        super(SqlVirtualMachinePreparer, self).__init__(name_prefix, sqlvm_max_length)
+        super().__init__(name_prefix, sqlvm_max_length)
         self.location = location
         self.parameter_name = parameter_name
         self.vm_user = vm_user
@@ -48,7 +48,7 @@ class SqlVirtualMachinePreparer(AbstractPreparer, SingleValueReplacer):
     def create_resource(self, name, **kwargs):
         group = self._get_resource_group(**kwargs)
         template = ('az vm create -l {} -g {} -n {} --admin-username {} --admin-password {} --image {}'
-                    ' --size Standard_DS2_v2 --nsg-rule NONE')
+                    ' --size Standard_B2ms --nsg-rule NONE')
         execute(DummyCli(), template.format(self.location, group, name, self.vm_user, self.vm_password, self.image))
         return {self.parameter_name: name}
 
@@ -70,7 +70,7 @@ class DomainPreparer(AbstractPreparer, SingleValueReplacer):
     def __init__(self, name_prefix=sqlvm_domain_prefix, location='westus',
                  vm_user='admin123', vm_password='SecretPassword123', parameter_name='domainvm',
                  resource_group_parameter_name='resource_group', skip_delete=True):
-        super(DomainPreparer, self).__init__(name_prefix, sqlvm_max_length)
+        super().__init__(name_prefix, sqlvm_max_length)
         self.location = location
         self.parameter_name = parameter_name
         self.vm_user = vm_user

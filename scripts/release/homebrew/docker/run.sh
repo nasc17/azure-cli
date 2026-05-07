@@ -2,6 +2,14 @@
 
 root=$(cd $(dirname $0); pwd)
 
+if command -v tdnf &> /dev/null; then
+    # Azure Linux
+    tdnf install -y ca-certificates
+elif command -v apt-get &> /dev/null; then
+    # Debian/Ubuntu
+    apt-get update && apt-get install -y ca-certificates
+fi
+
 pip install wheel
 pip install -U pip
 pip install -r $root/requirements.txt
@@ -12,4 +20,4 @@ pip list
 
 # default option is update_existing to build from homebrew master branch,
 # append '-b use_template' to build from formula_template.txt 
-python $root/formula_generate.py
+python3 $root/formula_generate.py

@@ -6,7 +6,7 @@
 import os
 import time
 
-from msrestazure.tools import parse_resource_id
+from azure.mgmt.core.tools import parse_resource_id
 
 from azure.cli.testsdk.scenario_tests import AllowLargeResponse
 from azure.cli.testsdk import (ScenarioTest, ResourceGroupPreparer, JMESPathCheck, LogAnalyticsWorkspacePreparer)
@@ -79,13 +79,100 @@ class ContainerAppJobsExecutionsTest(ScenarioTest):
             # check if the job execution name is in the response
             self.assertEqual(job in execution['name'], True)
 
+        # execute twice
+        execution2 = self.cmd(
+            "az containerapp job start --resource-group {} --name {}".format(resource_group, job)).get_output_in_json()
+        executionList = self.cmd(
+            "az containerapp job execution list --resource-group {} --name {}".format(resource_group, job), checks=[
+                JMESPathCheck('length(@)', 3),
+            ]).get_output_in_json()
+
+        for e in executionList:
+            self.assertEqual(e['properties']['status'], "Running")
+
         # stop the most recently started execution
-        self.cmd("az containerapp job stop --resource-group {} --name {} --job-execution-name {}".format(resource_group, job, execution['name'])).get_output_in_json()
+        stopExecution = self.cmd("az containerapp job stop --resource-group {} --name {} --job-execution-name {}".format(resource_group, job, execution['name']))
+        # check if the stopExecution response contains the job execution name
+        self.assertEqual(execution['name'] in stopExecution.output, True)
         
-        # get stopped execution for the job and check status
+        # get stopped execution for the job and check status after waiting for 5 seconds to ensure job has stopped
+        time.sleep(5)
         singleExecution = self.cmd("az containerapp job execution show --resource-group {} --name {} --job-execution-name {}".format(resource_group, job, execution['name'])).get_output_in_json()
         self.assertEqual(job in singleExecution['name'], True)
         self.assertEqual(singleExecution['properties']['status'], "Stopped")
+
+        executionList = self.cmd(
+            "az containerapp job execution list --resource-group {} --name {}".format(resource_group, job), checks=[
+                JMESPathCheck('length(@)', 3),
+            ]).get_output_in_json()
+
+        # The other one execution is still running
+        for e in executionList:
+            if e['name'] == singleExecution['name']:
+                self.assertEqual(e['properties']['status'], "Stopped")
+            else:
+                self.assertEqual(e['properties']['status'], "Running")
+
+        # self.cmd("az containerapp job execution show --resource-group {} --name {} --job-execution-name {}".format(resource_group, job, execution2['name']), checks=[
+        #     JMESPathCheck('properties.status', 'Running'),
+        # ])
+        self.cmd("az containerapp job stop --resource-group {} --name {}".format(resource_group, job), expect_failure=False).get_output_in_json()
+
+        # get stopped execution for the job and check status after waiting for 5 seconds to ensure job has stopped
+        time.sleep(5)
+        executionList = self.cmd("az containerapp job execution list --resource-group {} --name {}".format(resource_group, job), checks=[
+            JMESPathCheck('length(@)', 3),
+        ]).get_output_in_json()
+
+        for e in executionList:
+            self.assertEqual(e['properties']['status'], "Stopped")
+
+    @AllowLargeResponse(8192)
+    @ResourceGroupPreparer(location="northcentralus")
+    def test_containerapp_stop_job_deprecate_arguments(self, resource_group):
+        import requests
+
+        TEST_LOCATION = "northcentralusstage"
+        self.cmd('configure --defaults location={}'.format(TEST_LOCATION))
+
+        job = self.create_random_name(prefix='job4', length=24)
+
+        env_id = prepare_containerapp_env_for_app_e2e_tests(self)
+        env_rg = parse_resource_id(env_id).get('resource_group')
+        env_name = parse_resource_id(env_id).get('name')
+
+        # create a container app environment for a Container App Job resource
+        self.cmd('containerapp env show -n {} -g {}'.format(env_name, env_rg), checks=[
+            JMESPathCheck('name', env_name)
+        ])
+
+        # create a Container App Job resource
+        self.cmd("az containerapp job create --resource-group {} --name {} --environment {} --replica-timeout 200 --replica-retry-limit 1 --trigger-type manual --replica-completion-count 1 --parallelism 1 --image mcr.microsoft.com/k8se/quickstart:latest --cpu '0.25' --memory '0.5Gi'".format(resource_group, job, env_id))
+
+        # wait for 60s for the job to be provisioned
+        jobProvisioning = True
+        timeout = time.time() + 60*1   # 1 minutes from now
+        while(jobProvisioning):
+            jobProvisioning = self.cmd("az containerapp job show --resource-group {} --name {}".format(resource_group, job)).get_output_in_json()['properties']['provisioningState'] != "Succeeded"
+            if(time.time() > timeout):
+                break
+
+        # start an execution with custom container information
+        customContainerImage = "mcr.microsoft.com/k8se/quickstart:latest"
+        customContainerName = "job3-custom-exec"
+        execution = self.cmd("az containerapp job start --resource-group {} --name {} --image {} --container-name {} --cpu '0.5' --memory '1Gi'".format(resource_group, job, customContainerImage, customContainerName)).get_output_in_json()
+        if "id" in execution:
+            # check if the job execution id is in the response
+            self.assertEqual(job in execution['id'], True)
+        if "name" in execution:
+            # check if the job execution name is in the response
+            self.assertEqual(job in execution['name'], True)
+
+        # create a string list with job execution name
+        execution_name_list = execution['name']
+
+        # stop the execution with deprecated param --execution_name_list
+        self.cmd("az containerapp job stop --resource-group {} --name {} --execution-name-list {}".format(resource_group, job, execution['name']), expect_failure=False).get_output_in_json()
 
     @AllowLargeResponse(8192)
     @ResourceGroupPreparer(location="northcentralus")
@@ -178,6 +265,73 @@ class ContainerAppJobsExecutionsTest(ScenarioTest):
             JMESPathCheck('properties.template.initContainers[0].resources.memory', '0.5Gi')
         ])
         clean_up_test_file(containerappjob_file_name)
+
+    @AllowLargeResponse(8192)
+    @ResourceGroupPreparer(location="northcentralus")
+    def test_containerappjob_start_with_command_and_args_e2e(self, resource_group):
+        """
+        Test for GitHub issue https://github.com/microsoft/azure-container-apps/issues/1360
+        This test validates that --command and --args are properly applied when using
+        'az containerapp job start' without specifying --image (using the job's default image).
+        """
+
+        TEST_LOCATION = "northcentralusstage"
+        self.cmd('configure --defaults location={}'.format(TEST_LOCATION))
+
+        job = self.create_random_name(prefix='job-cmd', length=24)
+
+        env_id = prepare_containerapp_env_for_app_e2e_tests(self)
+        env_rg = parse_resource_id(env_id).get('resource_group')
+        env_name = parse_resource_id(env_id).get('name')
+
+        # create a container app environment for a Container App Job resource
+        self.cmd('containerapp env show -n {} -g {}'.format(env_name, env_rg), checks=[
+            JMESPathCheck('name', env_name)
+        ])
+
+        # Create a Container App Job resource with a default command
+        # Using an image that supports running custom commands (alpine with sh)
+        self.cmd("az containerapp job create --resource-group {} --name {} --environment {} --replica-timeout 200 --replica-retry-limit 1 --trigger-type manual --replica-completion-count 1 --parallelism 1 --image mcr.microsoft.com/k8se/quickstart-jobs:latest --cpu '0.25' --memory '0.5Gi'".format(resource_group, job, env_id))
+
+        # wait for 60s for the job to be provisioned
+        jobProvisioning = True
+        timeout = time.time() + 60*1   # 1 minutes from now
+        while(jobProvisioning):
+            jobProvisioning = self.cmd("az containerapp job show --resource-group {} --name {}".format(resource_group, job)).get_output_in_json()['properties']['provisioningState'] != "Succeeded"
+            if(time.time() > timeout):
+                break
+
+        # Test 1: Start job execution with --command and --args WITHOUT specifying --image
+        customCommand = ["echo"]
+        customArgs = ["hello-from-custom-command"]
+        execution = self.cmd("az containerapp job start --resource-group {} --name {} --command {} --args {}".format(
+            resource_group, job, " ".join(customCommand), " ".join(customArgs))).get_output_in_json()
+
+        if "name" in execution:
+            # Verify the execution was created
+            self.assertEqual(job in execution['name'], True)
+
+        # Get the execution and check if the custom command and args are present
+        # Also validate the image matches the one from 'az containerapp job create'
+        self.cmd("az containerapp job execution show --resource-group {} --name {} --job-execution-name {}".format(resource_group, job, execution['name']), checks=[
+            JMESPathCheck('properties.template.containers[0].image', 'mcr.microsoft.com/k8se/quickstart-jobs:latest'),
+            JMESPathCheck('properties.template.containers[0].command[0]', customCommand[0]),
+            JMESPathCheck('properties.template.containers[0].args[0]', customArgs[0]),
+        ])
+
+        # Test 2: For comparison, verify that --command and --args work when --image IS specified
+        customContainerImage = "mcr.microsoft.com/k8se/quickstart-jobs:latest"
+        execution_with_image = self.cmd("az containerapp job start --resource-group {} --name {} --image {} --command {} --args {}".format(
+            resource_group, job, customContainerImage, " ".join(customCommand), " ".join(customArgs))).get_output_in_json()
+
+        if "name" in execution_with_image:
+            self.assertEqual(job in execution_with_image['name'], True)
+
+        self.cmd("az containerapp job execution show --resource-group {} --name {} --job-execution-name {}".format(resource_group, job, execution_with_image['name']), checks=[
+            JMESPathCheck('properties.template.containers[0].image', customContainerImage),
+            JMESPathCheck('properties.template.containers[0].command[0]', customCommand[0]),
+            JMESPathCheck('properties.template.containers[0].args[0]', customArgs[0]),
+        ])
 
     @AllowLargeResponse(8192)
     @ResourceGroupPreparer(location="northcentralus")

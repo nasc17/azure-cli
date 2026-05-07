@@ -18,12 +18,28 @@ short-summary: Create an App Configuration.
 examples:
   - name: Create an App Configuration store with name, location, sku, tags and resource group.
     text: az appconfig create -g MyResourceGroup -n MyAppConfiguration -l westus --sku Standard --tags key1=value1 key2=value2
+  - name: Create an App Configuration store with Developer sku
+    text: az appconfig create -g MyResourceGroup -n MyAppConfiguration -l westus --sku Developer
+  - name: Create a premium sku App Configuration store with a replica
+    text: az appconfig create -g MyResourceGroup -n MyAppConfiguration -l westus --sku Premium --replica-name MyReplica --replica-location eastus
+  - name: Create a premium sku App Configuration store without a replica
+    text: az appconfig create -g MyResourceGroup -n MyAppConfiguration -l westus --sku Premium --no-replica
   - name: Create an App Configuration store with name, location, sku and resource group with system assigned identity.
     text: az appconfig create -g MyResourceGroup -n MyAppConfiguration -l westus --sku Standard --assign-identity
   - name: Create an App Configuration store with name, location, sku and resource group with user assigned identity.
     text: az appconfig create -g MyResourceGroup -n MyAppConfiguration -l westus --sku Standard --assign-identity /subscriptions/<SUBSCRIPTON ID>/resourcegroups/<RESOURCEGROUP>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/myUserAssignedIdentity
   - name: Create an App Configuration store with name, location and resource group with public network access enabled and local auth disabled.
     text: az appconfig create -g MyResourceGroup -n MyAppConfiguration -l westus --enable-public-network --disable-local-auth
+  - name: Create an App Configuration store with name, location and resource group with ARM authentication mode set to Pass-through.
+    text: az appconfig create -g MyResourceGroup -n MyAppConfiguration -l westus --arm-auth-mode pass-through
+  - name: Create an App Configuration store with name, location and resource group with ARM authentication mode set to Pass-through and private network access via ARM Private Link enabled.
+    text: az appconfig create -g MyResourceGroup -n MyAppConfiguration -l westus --arm-auth-mode pass-through --enable-arm-private-network-access true
+  - name: Create an App Configuration store with a key-value revision retention period of one day (in seconds).
+    text: az appconfig create -g MyResourceGroup -n MyAppConfiguration -l westus --sku Standard --kv-revision-retention-period 86400
+  - name: Create an App Configuration store linked to an Azure Front Door profile.
+    text: az appconfig create -g MyResourceGroup -n MyAppConfiguration -l westus --sku Standard --azure-front-door-profile /subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RESOURCEGROUP>/providers/Microsoft.Cdn/profiles/<PROFILE_NAME>
+  - name: Create an App Configuration store with an Application Insights resource linked for telemetry collection.
+    text: az appconfig create -g MyResourceGroup -n MyAppConfiguration -l westus --sku Standard --appinsights-resource /subscriptions/<SUBSCRIPTIONID>/resourceGroups/<RESOURCEGROUP>/providers/microsoft.insights/components/MyAppInsights
 """
 
 helps['appconfig list-deleted'] = """
@@ -139,13 +155,15 @@ examples:
     text: az appconfig kv delete --connection-string Endpoint=https://contoso.azconfig.io;Id=xxx;Secret=xxx --key color --label MyLabel
   - name: Delete a key using your 'az login' credentials and App Configuration store endpoint.
     text: az appconfig kv delete --endpoint https://myappconfiguration.azconfig.io --key color --auth-mode login --yes
+  - name: Delete a key with key name "color" and has tags "tag1=value1" and "tag2=value2".
+    text: az appconfig kv delete -n MyAppConfiguration --key color --tags tag1=value1 tag2=value2 --yes
 """
 
 helps['appconfig kv export'] = """
 type: command
 short-summary: Export configurations to another place from your App Configuration store.
 examples:
-  - name: Export all keys and feature flags with label test to a json file.
+  - name: Export all keys and feature flags with label test to a json file. To use the Microsoft Feature Management schema when exporting feature flags to a file, set the environment variable AZURE_APPCONFIG_FM_COMPATIBLE to False.
     text: az appconfig kv export -n MyAppConfiguration --label test -d file --path D:/abc.json --format json
   - name: Export all keys with null label to an App Service application.
     text: az appconfig kv export -n MyAppConfiguration -d appservice --appservice-account MyAppService
@@ -161,6 +179,12 @@ examples:
     text: az appconfig kv export -n MyAppConfiguration --label test -d file --path D:/abc.json --format json --profile appconfig/kvset
   - name: Export all keys to another App Configuration store from a snapshot of the source configuration
     text: az appconfig kv export -n MyAppConfiguration -d appconfig --dest-name AnotherAppConfiguration --snapshot MySnapshot
+  - name: Export all keys and feature flags with specific tags to another App Configuration store.
+    text: az appconfig kv export -n MyAppConfiguration -d appconfig --tags tag1=value1 tag2=value2 --dest-name AnotherAppConfiguration
+  - name: Export all keys and feature flags to another App Configuration store and apply new tags.
+    text: az appconfig kv export -n MyAppConfiguration -d appconfig --dest-name AnotherAppConfiguration --dest-tags newtag1=newvalue1
+  - name: Preview the export result without making any changes to the App Configuration store.
+    text: az appconfig kv export -n MyAppConfiguration --label test -d file --path D:/abc.json --format json --dry-run
 """
 
 helps['appconfig kv import'] = """
@@ -185,6 +209,13 @@ examples:
     text: az appconfig kv import -s appconfig --endpoint https://myappconfiguration.azconfig.io --auth-mode login --src-endpoint https://anotherappconfiguration.azconfig.io --src-auth-mode login --src-key * --src-label * --preserve-labels
   - name: Import all keys and feature flags from a file using the appconfig/kvset format.
     text: az appconfig kv import -n MyAppConfiguration -s file --path D:/abc.json --format json --profile appconfig/kvset
+  - name: Import all keys and feature flags with specific tags from an App Configuration store and apply new tags.
+    text: az appconfig kv import -n MyAppConfiguration -s appconfig --src-name AnotherAppConfiguration --src-tags tag1=value1 tag2=value2 --tags newtag1=newvalue1
+  - name: Import all keys and feature flags from a file and apply new tags.
+    text: az appconfig kv import -n MyAppConfiguration -s file --path D:/abc.json --format json --tags tag1=value1
+  - name: Preview the import result without making any changes to the App Configuration store.
+    text: az appconfig kv import -n MyAppConfiguration -s file --path D:/abc.json --format json --dry-run
+
 """
 
 helps['appconfig kv list'] = """
@@ -205,6 +236,12 @@ examples:
     text: az appconfig kv list --endpoint https://myappconfiguration.azconfig.io --auth-mode login
   - name: List all key-values in a given snapshot of the app configuration store.
     text: az appconfig kv list --connection-string Endpoint=https://contoso.azconfig.io;Id=xxx;Secret=xxx --snapshot MySnapshot
+  - name: List all key-values with specific tags
+    text: az appconfig kv list -n MyAppConfiguration --tags tag1=value1 tag2=value2
+  - name: List all key-values with tag name "tag1" with empty value
+    text: az appconfig kv list -n MyAppConfiguration --tags tag1=
+  - name: List all key-values with tag name "tag1" with null value
+    text: az appconfig kv list -n MyAppConfiguration --tags tag1=\\0
 """
 
 helps['appconfig kv lock'] = """
@@ -225,6 +262,10 @@ examples:
     text: az appconfig kv restore -n MyAppConfiguration --datetime "2019-05-01T11:24:12Z"
   - name: Restore a specific key for any label start with v1. using connection string to a specific point in time.
     text: az appconfig kv restore --key color --connection-string Endpoint=https://contoso.azconfig.io;Id=xxx;Secret=xxx --label v1.* --datetime "2019-05-01T11:24:12Z"
+  - name: Restore all key-values with specific tags to a specific point in time.
+    text: az appconfig kv restore -n MyAppConfiguration --tags tag1=value1 tag2=value2 --datetime "2019-05-01T11:24:12Z"
+  - name: Preview the restore result without making any changes to the App Configuration store.
+    text: az appconfig kv restore -n MyAppConfiguration --datetime "2019-05-01T11:24:12Z" --dry-run
 """
 
 helps['appconfig kv set'] = """
@@ -302,6 +343,12 @@ examples:
     text: az appconfig revision list --connection-string Endpoint=https://contoso.azconfig.io;Id=xxx;Secret=xxx --key color --datetime "2019-05-01T11:24:12Z"
   - name: List revision history for all items and query only key, value and last_modified.
     text: az appconfig revision list --connection-string Endpoint=https://contoso.azconfig.io;Id=xxx;Secret=xxx --fields key value last_modified
+  - name: List revision history for all items with specific tags.
+    text: az appconfig revision list -n MyAppConfiguration --tags tag1=value1 tag2=value2
+  - name: List revision history for all items with tag name "tag1" with empty value.
+    text: az appconfig revision list -n MyAppConfiguration --tags tag1=
+  - name : List revision history for all items with tag name "tag1" with null value
+    text: az appconfig revision list -n MyAppConfiguration --tags tag1=\\0
 """
 
 helps['appconfig replica'] = """
@@ -355,14 +402,30 @@ short-summary: Update an App Configuration store.
 examples:
   - name: Update tags of an App Configuration store
     text: az appconfig update -g MyResourceGroup -n MyAppConfiguration --tags key1=value1 key2=value2
-  - name: Upgrade sku of an App Configuration store to standard
+  - name: Upgrade sku of an App Configuration store to the standard tier
     text: az appconfig update -g MyResourceGroup -n MyAppConfiguration --sku Standard
+  - name: Upgrade sku of an App Configuration store to the premium tier
+    text: az appconfig update -g MyResourceGroup -n MyAppConfiguration --sku Premium
   - name: Enable customer encryption key with system assigned identity
     text: az appconfig update -g MyResourceGroup -n MyAppConfiguration --encryption-key-name myKey --encryption-key-version keyVersion --encryption-key-vault https://keyVaultName.vault.azure.net
   - name: Remove customer encryption key
     text: az appconfig update -g MyResourceGroup -n MyAppConfiguration --encryption-key-name ""
   - name: Update an App Configuration store to enable public network access and disable local auth.
     text: az appconfig update -g MyResourceGroup -n MyAppConfiguration --enable-public-network true --disable-local-auth true
+  - name: Update an App Configuration store to set ARM authentication mode set to Pass-through.
+    text: az appconfig update -g MyResourceGroup -n MyAppConfiguration --arm-auth-mode pass-through
+  - name: Update an App Configuration store to set ARM authentication mode set to Pass-through and enable private network access via ARM Private Link.
+    text: az appconfig update -g MyResourceGroup -n MyAppConfiguration --arm-auth-mode pass-through --enable-arm-private-network-access true
+  - name: Update an App Configuration store to set a key-value revision retention period of one day (in seconds).
+    text: az appconfig update -g MyResourceGroup -n MyAppConfiguration --kv-revision-retention-period 86400
+  - name: Update an App Configuration store to link an Azure Front Door profile.
+    text: az appconfig update -g MyResourceGroup -n MyAppConfiguration --azure-front-door-profile /subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RESOURCEGROUP>/providers/Microsoft.Cdn/profiles/<PROFILE_NAME>
+  - name: Update an App Configuration store to unlink an Azure Front Door profile.
+    text: az appconfig update -g MyResourceGroup -n MyAppConfiguration --azure-front-door-profile ""
+  - name: Link an Application Insights resource to an App Configuration store for telemetry collection.
+    text: az appconfig update -g MyResourceGroup -n MyAppConfiguration --appinsights-resource /subscriptions/<SUBSCRIPTIONID>/resourceGroups/<RESOURCEGROUP>/providers/microsoft.insights/components/MyAppInsights
+  - name: Unlink Application Insights from an App Configuration store.
+    text: az appconfig update -g MyResourceGroup -n MyAppConfiguration --appinsights-resource ""
 """
 
 helps['appconfig feature'] = """
@@ -386,6 +449,15 @@ helps['appconfig feature set'] = """
         - name: Set a feature flag with name "Beta" and custom key ".appconfig.featureflag/MyApp1:Beta".
           text:
             az appconfig feature set -n MyAppConfiguration --feature Beta --key .appconfig.featureflag/MyApp1:Beta
+        - name: Set a feature flag with name "Beta" and custom key ".appconfig.featureflag/MyApp1:Beta" with tags "tag1=value1" and "tag2=value2".
+          text:
+            az appconfig feature set -n MyAppConfiguration --feature Beta --key .appconfig.featureflag/MyApp1:Beta --tags tag1=value1 tag2=value2
+        - name: Set a feature flag with telemetry enabled.
+          text:
+            az appconfig feature set -n MyAppConfiguration --feature color --telemetry-enabled
+        - name: Disable telemetry on a feature flag.
+          text:
+            az appconfig feature set -n MyAppConfiguration --feature color --telemetry-enabled false
     """
 
 helps['appconfig feature delete'] = """
@@ -404,6 +476,9 @@ helps['appconfig feature delete'] = """
         - name: Delete a feature whose name is "Beta" but key is ".appconfig.featureflag/MyApp1:Beta".
           text:
             az appconfig feature delete -n MyAppConfiguration --key .appconfig.featureflag/MyApp1:Beta --yes
+        - name: Delete a feature whose name is "Beta" but key is ".appconfig.featureflag/MyApp1:Beta" with tags "tag1=value1" and "tag2=value2".
+          text:
+            az appconfig feature delete -n MyAppConfiguration --key .appconfig.featureflag/MyApp1:Beta --tags tag1=value1 tag2=value2 --yes
     """
 
 helps['appconfig feature show'] = """
@@ -449,6 +524,12 @@ helps['appconfig feature list'] = """
         - name: List all features starting with "MyApp1".
           text:
             az appconfig feature list -n MyAppConfiguration --key .appconfig.featureflag/MyApp1*
+        - name: List all feature flags with specific tags.
+          text:
+            az appconfig feature list -n MyAppConfiguration --tags tag1=value1 tag2=value2
+        - name: List all feature flags with tag name "tag1" with empty value.
+          text:
+            az appconfig feature list -n MyAppConfiguration --tags tag1=
     """
 
 helps['appconfig feature lock'] = """
@@ -616,6 +697,9 @@ helps['appconfig snapshot create'] = """
         - name: Create a snapshot of all keys starting with 'app/' and no label as default, then override the key-values with keys with the label 'prod' if they exist.
           text:
             az appconfig snapshot create -s MySnapshot -n MyAppConfiguration --filters '{\\"key\\":\\"app/*\\"}' '{\\"key\\":\\"app/*\\", \\"label\\":\\"prod\\"}' --composition-type 'key'
+        - name: Create a snapshot of all keys starting with 'Test' and have tags 'tag1=value1' and 'tag2=value2'.
+          text:
+            az appconfig snapshot create -s MySnapshot -n MyAppConfiguration --filters '{\\"key\\":\\"Test*\\", \\"tags\\":[\\"tag1=value1\\", \\"tag2=value2\\"]}'
     """
 
 helps['appconfig snapshot show'] = """

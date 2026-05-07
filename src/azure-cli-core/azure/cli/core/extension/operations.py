@@ -13,7 +13,6 @@ import zipfile
 import traceback
 import hashlib
 from subprocess import check_output, STDOUT, CalledProcessError
-from urllib.parse import urlparse
 
 from packaging.version import parse
 
@@ -46,7 +45,7 @@ LSB_RELEASE_FILE = os.path.join(os.sep, 'etc', 'lsb-release')
 
 
 def _run_pip(pip_exec_args, extension_path=None):
-    cmd = [sys.executable, '-m', 'pip'] + pip_exec_args + ['-vv', '--disable-pip-version-check', '--no-cache-dir']
+    cmd = [sys.executable, '-m', 'pip'] + pip_exec_args + ['--disable-pip-version-check', '--no-cache-dir']
     logger.debug('Running: %s', cmd)
     try:
         log_output = check_output(cmd, stderr=STDOUT, universal_newlines=True)
@@ -65,7 +64,7 @@ def _whl_download_from_url(url_parse_result, ext_file):
     import requests
     from azure.cli.core.util import should_disable_connection_verify
     url = url_parse_result.geturl()
-    r = requests.get(url, stream=True, verify=(not should_disable_connection_verify()))
+    r = requests.get(url, stream=True, verify=not should_disable_connection_verify())
     if r.status_code != 200:
         raise CLIError("Request to {} failed with {}".format(url, r.status_code))
     with open(ext_file, 'wb') as f:
@@ -85,6 +84,7 @@ def _validate_whl_extension(ext_file):
 
 
 def _get_extension_info_from_source(source):
+    from urllib.parse import urlparse
     url_parse_result = urlparse(source)
     is_url = (url_parse_result.scheme == 'http' or url_parse_result.scheme == 'https')
     whl_filename = os.path.basename(url_parse_result.path) if is_url else os.path.basename(source)
@@ -96,6 +96,7 @@ def _get_extension_info_from_source(source):
 
 
 def _add_whl_ext(cli_ctx, source, ext_sha256=None, pip_extra_index_urls=None, pip_proxy=None, system=None):  # pylint: disable=too-many-statements
+    from urllib.parse import urlparse
     cli_ctx.get_progress_controller().add(message='Analyzing')
     if not source.endswith('.whl'):
         raise ValueError('Unknown extension type. Only Python wheels are supported.')
@@ -194,7 +195,7 @@ def _install_deps_for_psycopg2():  # pylint: disable=too-many-statements
     system = platform.system()
     if system == 'Darwin':
         subprocess.call(['xcode-select', '--install'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if installer != 'HOMEBREW':
+        if installer not in ('HOMEBREW', 'HOMEBREW_CASK'):
             from shutil import which
             if which('brew') is None:
                 logger.warning('You may need to install postgresql with homebrew first before you install this extension.')
@@ -306,12 +307,6 @@ def check_version_compatibility(azext_metadata):
 def add_extension(cmd=None, source=None, extension_name=None, index_url=None, yes=None,  # pylint: disable=unused-argument, too-many-statements
                   pip_extra_index_urls=None, pip_proxy=None, system=None,
                   version=None, cli_ctx=None, upgrade=None, allow_preview=None):
-    if allow_preview is None:
-        logger.warning("Default enabled including preview versions for extension installation now. "
-                       "Disabled in future release. "
-                       "Use '--allow-preview true' to enable it specifically if needed. "
-                       "Use '--allow-preview false' to install stable version only. ")
-        allow_preview = True
     ext_sha256 = None
     update_to_latest = version == 'latest' and not source
 
@@ -405,12 +400,6 @@ def show_extension(extension_name):
 
 
 def update_extension(cmd=None, extension_name=None, index_url=None, pip_extra_index_urls=None, pip_proxy=None, allow_preview=None, cli_ctx=None, version=None, download_url=None, ext_sha256=None):
-    if allow_preview is None:
-        logger.warning("Default enabled including preview versions for extension installation now. "
-                       "Disabled in future release. "
-                       "Use '--allow-preview true' to enable it specifically if needed. "
-                       "Use '--allow-preview false' to install stable version only. ")
-        allow_preview = True
     try:
         cmd_cli_ctx = cli_ctx or cmd.cli_ctx
         ext = get_extension(extension_name, ext_type=WheelExtension)

@@ -5,7 +5,8 @@
 
 from knack.util import CLIError
 from knack.log import get_logger
-from msrestazure.tools import is_valid_resource_id, parse_resource_id
+from azure.mgmt.core.tools import is_valid_resource_id, parse_resource_id
+from azure.cli.command_modules.acr._docker_utils import get_login_server_suffix
 from azure.cli.core.commands import LongRunningOperation
 from azure.cli.core.util import sdk_no_wait
 
@@ -53,7 +54,7 @@ def acr_import(cmd,  # pylint: disable=too-many-locals
         if is_valid_resource_id(source_registry):
             source = ImportSource(resource_id=source_registry, source_image=source_image)
         else:
-            registry = get_registry_from_name_or_login_server(cmd.cli_ctx, source_registry, source_registry)
+            registry = _get_azure_registry(cmd, source_registry)
             if registry:
                 # trim away redundant login server name, a common error
                 prefix = registry.login_server + '/'
@@ -77,7 +78,7 @@ def acr_import(cmd,  # pylint: disable=too-many-locals
                                   credentials=ImportSourceCredentials(password=source_registry_password,
                                                                       username=source_registry_username))
         else:
-            registry = get_registry_from_name_or_login_server(cmd.cli_ctx, registry_uri)
+            registry = _get_azure_registry(cmd, registry_uri)
             if registry:
                 # For Azure container registry
                 source = ImportSource(resource_id=registry.id, source_image=source_image)
@@ -113,8 +114,41 @@ def acr_import(cmd,  # pylint: disable=too-many-locals
         _handle_import_exception(e, cmd, source_registry, source_image, registry)
 
 
+def _regional_endpoint_uri_to_login_server(uri, login_server_suffix):
+    """Convert regional endpoint URI to standard login server URI.
+
+    Example: testregistry.eastus.geo.azurecr.io -> testregistry.azurecr.io
+    """
+    if not uri or not login_server_suffix:
+        return uri
+
+    uri_lower = uri.strip().lower()
+    suffix_lower = login_server_suffix.lower()
+    parts = uri_lower.split('.')
+
+    if len(parts) == 5 and parts[2] == 'geo' and uri_lower.endswith(suffix_lower):
+        return f"{parts[0]}{login_server_suffix}"
+
+    # If not a regional endpoint format, return as-is
+    return uri
+
+
+def _get_azure_registry(cmd, source_registry):
+    """Get Azure registry from login server URI or registry name, handling regional endpoint URI."""
+    lookup_uri = source_registry
+
+    # Try to get the pre-defined login server suffix.
+    login_server_suffix = get_login_server_suffix(cmd.cli_ctx)
+    # Convert regional endpoint to standard format if applicable
+    if login_server_suffix and source_registry.endswith(f".geo{login_server_suffix}"):
+        lookup_uri = _regional_endpoint_uri_to_login_server(source_registry, login_server_suffix)
+
+    # Search by login server (lookup_uri) and registry name (source_registry) to handle both URI and name inputs
+    return get_registry_from_name_or_login_server(cmd.cli_ctx, lookup_uri, source_registry)
+
+
 def _handle_import_exception(e, cmd, source_registry, source_image, registry):
-    from msrestazure.azure_exceptions import ClientException
+    from msrest.exceptions import ClientException
     try:
         # if command fails, it might be because user specified registry twice in --source and --registry
         if source_registry:
@@ -123,7 +157,7 @@ def _handle_import_exception(e, cmd, source_registry, source_image, registry):
                 if is_valid_resource_id(source_registry):
                     registry, _ = get_registry_by_name(cmd.cli_ctx, parse_resource_id(source_registry)["name"])
                 else:
-                    registry = get_registry_from_name_or_login_server(cmd.cli_ctx, source_registry, source_registry)
+                    registry = _get_azure_registry(cmd, source_registry)
 
             if registry.login_server.lower() in source_image.lower():
                 logger.warning("Import from source failed.\n\tsource image: '%s'\n"

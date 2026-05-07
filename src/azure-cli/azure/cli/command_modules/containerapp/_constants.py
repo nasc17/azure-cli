@@ -7,13 +7,14 @@ CONNECTED_ENVIRONMENT_TYPE = "connected"
 MANAGED_ENVIRONMENT_RESOURCE_TYPE = "managedEnvironments"
 CONNECTED_ENVIRONMENT_RESOURCE_TYPE = "connectedEnvironments"
 
-MAXIMUM_SECRET_LENGTH = 20
+MAXIMUM_ACR_LENGTH = 121
 MAXIMUM_CONTAINER_APP_NAME_LENGTH = 32
 
 SHORT_POLLING_INTERVAL_SECS = 3
 LONG_POLLING_INTERVAL_SECS = 10
 
 ACR_IMAGE_SUFFIX = ".azurecr.io"
+ACR_IMAGE_SUFFIXES = (".azurecr.io", ".azurecr.cn", ".azurecr.us")
 
 CONTAINER_APPS_SDK_MODELS = "azure.cli.command_modules.containerapp._sdk_models"
 
@@ -74,7 +75,7 @@ steps:
   - push: ["$Registry/{{image_name}}"]
     timeout: 1800
 """
-DEFAULT_PORT = 8080  # used for no dockerfile scenario; not the hello world image
+DEFAULT_PORT = 0  # used for no dockerfile scenario; not the hello world image. Auto detect the port
 
 HELLO_WORLD_IMAGE = "mcr.microsoft.com/k8se/quickstart:latest"
 

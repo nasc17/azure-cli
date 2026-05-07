@@ -26,6 +26,7 @@ omitted     Warning     Debug       Critical    Debug
 import os
 import logging
 import datetime
+from logging.handlers import RotatingFileHandler
 
 from azure.cli.core.commands.events import EVENT_INVOKER_PRE_CMD_TBL_TRUNCATE
 
@@ -38,11 +39,25 @@ _UNKNOWN_COMMAND = "unknown_command"
 _CMD_LOG_LINE_PREFIX = "CMD-LOG-LINE-BEGIN"
 
 
+class SecureFileHandler(logging.FileHandler):
+    """A FileHandler that creates the log file with 600 permissions (owner read/write only)."""
+    def _open(self):
+        fd = os.open(self.baseFilename, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        return os.fdopen(fd, self.mode, encoding=self.encoding)
+
+
+class SecureRotatingFileHandler(RotatingFileHandler):
+    """A RotatingFileHandler that creates log files with 600 permissions (owner read/write only)."""
+    def _open(self):
+        fd = os.open(self.baseFilename, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        return os.fdopen(fd, self.mode, encoding=self.encoding)
+
+
 class AzCliLogging(CLILogging):
     COMMAND_METADATA_LOGGER = 'az_command_data_logger'
 
     def __init__(self, name, cli_ctx=None):
-        super(AzCliLogging, self).__init__(name, cli_ctx)
+        super().__init__(name, cli_ctx)
         self.command_log_dir = os.path.join(cli_ctx.config.config_dir, 'commands')
         self.command_logger_handler = None
         self.command_metadata_logger = None
@@ -50,13 +65,27 @@ class AzCliLogging(CLILogging):
         self.cli_ctx.register_event(EVENT_CLI_POST_EXECUTE, AzCliLogging.deinit_cmd_metadata_logging)
 
     def configure(self, args):
-        super(AzCliLogging, self).configure(args)
+        super().configure(args)
         from knack.log import CliLogLevel
         if self.log_level == CliLogLevel.DEBUG:
             # As azure.core.pipeline.policies.http_logging_policy is a redacted version of
             # azure.core.pipeline.policies._universal, disable azure.core.pipeline.policies.http_logging_policy
             # when debug log is shown.
             logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.CRITICAL)
+
+    def _init_logfile_handlers(self, root_logger, cli_loggers):
+        # Override knack's CLILogging._init_logfile_handlers() (called by CLILogging.configure())
+        # to use SecureRotatingFileHandler, ensuring log files are created with 0o600 permissions.
+        ensure_dir(self.log_dir)
+        log_file_path = os.path.join(self.log_dir, self.logfile_name)
+        logfile_handler = SecureRotatingFileHandler(log_file_path, maxBytes=10 * 1024 * 1024, backupCount=5,
+                                                    encoding=LOG_FILE_ENCODING)
+        lfmt = logging.Formatter('%(process)d : %(asctime)s : %(levelname)s : %(name)s : %(message)s')
+        logfile_handler.setFormatter(lfmt)
+        logfile_handler.setLevel(logging.DEBUG)
+        root_logger.addHandler(logfile_handler)
+        for cli_logger in cli_loggers:
+            cli_logger.addHandler(logfile_handler)
 
     def get_command_log_dir(self):
         return self.command_log_dir
@@ -112,7 +141,7 @@ class AzCliLogging(CLILogging):
         log_file_path = os.path.join(self.command_log_dir, log_name)
         get_logger(__name__).debug("metadata file logging enabled - writing logs to '%s'.", log_file_path)
 
-        logfile_handler = logging.FileHandler(log_file_path, encoding=LOG_FILE_ENCODING)
+        logfile_handler = SecureFileHandler(log_file_path, encoding=LOG_FILE_ENCODING)
 
         lfmt = logging.Formatter(_CMD_LOG_LINE_PREFIX + ' %(process)d | %(asctime)s | %(levelname)s | %(name)s | %(message)s')  # pylint: disable=line-too-long
         logfile_handler.setFormatter(lfmt)

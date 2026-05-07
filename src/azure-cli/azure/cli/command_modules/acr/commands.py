@@ -44,7 +44,6 @@ from ._client_factory import (
     cf_acr_private_endpoint_connections,
     cf_acr_agentpool,
     cf_acr_connected_registries,
-    cf_acr_network_rules,
     cf_acr_cache,
     cf_acr_cred_sets
 )
@@ -139,8 +138,7 @@ def load_command_table(self, _):
     )
 
     acr_network_rule_util = CliCommandType(
-        operations_tmpl='azure.cli.command_modules.acr.network_rule#{}',
-        client_factory=cf_acr_network_rules
+        operations_tmpl='azure.cli.command_modules.acr.network_rule#{}'
     )
 
     acr_check_health_util = CliCommandType(
@@ -360,16 +358,7 @@ def load_command_table(self, _):
         g.show_command('show', 'acr_config_authentication_as_arm_show')
         g.command('update', 'acr_config_authentication_as_arm_update')
 
-    def _helm_deprecate_message(self):
-        msg = "This {} has been deprecated and will be removed in future release.".format(self.object_type)
-        msg += " Use '{}' instead.".format(self.redirect)
-        msg += " For more information go to"
-        msg += " https://aka.ms/acr/helm"
-        return msg
-
-    with self.command_group('acr helm', acr_helm_util,
-                            deprecate_info=self.deprecate(redirect="helm v3",
-                                                          message_func=_helm_deprecate_message)) as g:
+    with self.command_group('acr helm', acr_helm_util) as g:
         g.command('list', 'acr_helm_list', table_transformer=helm_list_output_format)
         g.show_command('show', 'acr_helm_show', table_transformer=helm_show_output_format)
         g.command('delete', 'acr_helm_delete')
@@ -429,7 +418,7 @@ def load_command_table(self, _):
         g.show_command('show', 'show_encryption')
         g.command('rotate-key', "rotate_key")
 
-    with self.command_group('acr connected-registry', acr_connected_registry_util, is_preview=True) as g:
+    with self.command_group('acr connected-registry', acr_connected_registry_util) as g:
         g.command('create', 'acr_connected_registry_create')
         g.command('delete', 'acr_connected_registry_delete')
         g.show_command('show', 'acr_connected_registry_show')
@@ -445,6 +434,7 @@ def load_command_table(self, _):
                   table_transformer=token_output_format)
         g.command('repo', 'acr_connected_registry_permissions_update',
                   deprecate_info=self.deprecate(redirect='permissions update', hide=True))
+        g.command('resync', 'acr_connected_registry_resync', is_preview=True)
 
     with self.command_group('acr connected-registry install', acr_connected_registry_util,
                             deprecate_info=self.deprecate(redirect='acr connected-registry get-settings',

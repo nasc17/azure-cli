@@ -5,7 +5,7 @@
 # pylint: disable=line-too-long, protected-access, too-few-public-methods
 from knack.log import get_logger
 from knack.util import CLIError
-from msrestazure.tools import is_valid_resource_id, parse_resource_id, resource_id
+from azure.mgmt.core.tools import is_valid_resource_id, parse_resource_id, resource_id
 
 from azure.cli.core.azclierror import ValidationError, RequiredArgumentMissingError, MutuallyExclusiveArgumentError
 from azure.cli.core.commands.arm import get_arm_resource_by_id
@@ -16,6 +16,7 @@ from azure.cli.core.aaz.utils import assign_aaz_list_arg
 from azure.cli.core.commands.client_factory import get_mgmt_service_client
 from azure.cli.core.profiles import ResourceType
 from azure.cli.core.commands.validators import validate_tags
+from azure.cli.command_modules.network._validators import validate_managed_identity_resource_id
 from .._validators import _resolve_api_version
 
 from ..aaz.latest.network.watcher import RunConfigurationDiagnostic as _RunConfigurationDiagnostic
@@ -71,11 +72,14 @@ def get_network_watcher_from_location(cmd, watcher_name="watcher_name", rg_name=
 
 
 def get_network_watcher_from_vm(cmd):
+    from ...vm.operations.vm import VMShow
     args = cmd.ctx.args
-    compute_client = get_mgmt_service_client(cmd.cli_ctx, ResourceType.MGMT_COMPUTE).virtual_machines
     vm_name = parse_resource_id(args.vm.to_serialized_data())["name"]
-    vm = compute_client.get(args.resource_group_name, vm_name)
-    args.location = vm.location
+    vm = VMShow(cli_ctx=cmd.cli_ctx)(command_args={
+        'resource_group': args.resource_group_name,
+        'vm_name': vm_name
+    })
+    args.location = vm.get('location')
     get_network_watcher_from_location(cmd)
 
 
@@ -87,11 +91,14 @@ def get_network_watcher_from_resource(cmd):
 
 
 def get_network_watcher_from_vmss(cmd):
+    from ...vm.operations.vmss import VMSSShow
     args = cmd.ctx.args
-    compute_client = get_mgmt_service_client(cmd.cli_ctx, ResourceType.MGMT_COMPUTE).virtual_machine_scale_sets
     vmss_name = parse_resource_id(args.target.to_serialized_data())["name"]
-    vmss = compute_client.get(args.resource_group_name, vmss_name)
-    args.location = vmss.location
+    vmss = VMSSShow(cli_ctx=cmd.cli_ctx)(command_args={
+        'resource_group': args.resource_group_name,
+        'vm_scale_set_name': vmss_name
+    })
+    args.location = vmss.get('location')
     get_network_watcher_from_location(cmd)
 
 
@@ -386,16 +393,19 @@ class TestConnectivity(_TestConnectivity):
         return args_schema
 
     def pre_operations(self):
+        from ...vm.operations.vm import VMShow
         args = self.ctx.args
-        compute_client = get_mgmt_service_client(self.cli_ctx, ResourceType.MGMT_COMPUTE).virtual_machines
         id_parts = parse_resource_id(args.source_resource.to_serialized_data())
         vm_name = id_parts["name"]
         rg = args.resource_group_name or id_parts.get("resource_group", None)
         if not rg:
             raise ValidationError("usage error: --source-resource ID | --source-resource NAME --resource-group NAME")
 
-        vm = compute_client.get(rg, vm_name)
-        args.location = vm.location
+        vm = VMShow(cli_ctx=self.cli_ctx)(command_args={
+            'resource_group': rg,
+            'vm_name': vm_name
+        })
+        args.location = vm.get('location')
         get_network_watcher_from_location(self)
 
         if has_value(args.source_resource) and not is_valid_resource_id(args.source_resource.to_serialized_data()):
@@ -569,7 +579,6 @@ def process_nw_cm_v2_create_namespace(cmd):
     validate_tags(args)
     if not has_value(args.location):  # location is None only occurs in creating a V2 connection monitor
         endpoint_source_resource_id = args.endpoint_source_resource_id.to_serialized_data()
-        from azure.mgmt.resource import ResourceManagementClient
         # parse and verify endpoint_source_resource_id
         if not has_value(args.endpoint_source_resource_id):
             raise ValidationError('usage error: --location/--endpoint-source-resource-id '
@@ -578,7 +587,7 @@ def process_nw_cm_v2_create_namespace(cmd):
             raise ValidationError('usage error: "{}" is not a valid resource id'.format(endpoint_source_resource_id))
 
         resource = parse_resource_id(endpoint_source_resource_id)
-        resource_client = get_mgmt_service_client(cmd.cli_ctx, ResourceManagementClient)
+        resource_client = get_mgmt_service_client(cmd.cli_ctx, ResourceType.MGMT_RESOURCE_RESOURCES)
         resource_api_version = _resolve_api_version(resource_client,
                                                     resource['namespace'],
                                                     resource['resource_parent'],
@@ -1062,6 +1071,11 @@ class NwFlowLogCreate(_NwFlowLogCreate):
                 minimum=10,
             )
         )
+        args_schema.user_assigned_identity = AAZResourceIdArg(
+            options=["--user-assigned-identity"],
+            help="Name or ID of the ManagedIdentity Resource.",
+            required=False,
+        )
         args_schema.retention = AAZIntArg(
             options=['--retention'],
             help="Number of days to retain logs.",
@@ -1134,6 +1148,21 @@ class NwFlowLogCreate(_NwFlowLogCreate):
         elif has_value(args.nsg):
             args.target_resource_id = args.nsg
 
+        if has_value(args.user_assigned_identity):
+            user_assigned_identity = args.user_assigned_identity.to_serialized_data()
+            is_valid_miresource_id = validate_managed_identity_resource_id(user_assigned_identity)
+            if not is_valid_miresource_id:
+                raise CLIError('Managed Identity resource id is invalid')
+            if user_assigned_identity.lower() != 'none':
+                args.identity = {
+                    "type": "UserAssigned",
+                    "user_assigned_identities": {user_assigned_identity: {}}
+                }
+            else:
+                args.identity = {
+                    "type": "None"
+                }
+
         if has_value(args.retention):
             if args.retention > 0:
                 args.retention_policy = {"days": args.retention, "enabled": True}
@@ -1178,6 +1207,11 @@ class NwFlowLogUpdate(_NwFlowLogUpdate):
                 maximum=60,
                 minimum=10,
             )
+        )
+        args_schema.user_assigned_identity = AAZResourceIdArg(
+            options=["--user-assigned-identity"],
+            help="Name or ID of the ManagedIdentity Resource.",
+            required=False,
         )
         args_schema.traffic_analytics_enabled = AAZBoolArg(
             options=['--traffic-analytics'], arg_group="Traffic Analytics", nullable=True,
@@ -1245,9 +1279,23 @@ class NwFlowLogUpdate(_NwFlowLogUpdate):
             args.target_resource_id = args.nic
         elif has_value(args.nsg):
             args.target_resource_id = args.nsg
-
         if has_value(args.retention) and args.retention > 0:
             args.retention_policy = {"days": args.retention, "enabled": True}
+
+        if has_value(args.user_assigned_identity):
+            user_assigned_identity = args.user_assigned_identity.to_serialized_data()
+            is_valid_miresource_id = validate_managed_identity_resource_id(user_assigned_identity)
+            if not is_valid_miresource_id:
+                raise CLIError('Managed Identity resource id is invalid')
+            if user_assigned_identity.lower() != 'none':
+                args.identity = {
+                    "type": "UserAssigned",
+                    "user_assigned_identities": {user_assigned_identity: {}}
+                }
+            else:
+                args.identity = {
+                    "type": "None"
+                }
 
         if has_value(args.traffic_analytics_workspace):
             workspace = get_arm_resource_by_id(self.cli_ctx, args.traffic_analytics_workspace.to_serialized_data())

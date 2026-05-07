@@ -47,11 +47,11 @@ long-summary: >
 
     - Configure public access
 
-    https://docs.microsoft.com/en-us/azure/mysql/flexible-server/how-to-manage-firewall-cli
+    https://learn.microsoft.com/en-us/azure/mysql/flexible-server/how-to-manage-firewall-cli
 
     - Configure private access
 
-    https://docs.microsoft.com/en-us/azure/mysql/flexible-server/how-to-manage-virtual-network-cli
+    https://learn.microsoft.com/en-us/azure/mysql/flexible-server/how-to-manage-virtual-network-cli
 
 examples:
   - name: >
@@ -231,11 +231,11 @@ long-summary: >
 
     - Configure public access
 
-    https://docs.microsoft.com/en-us/azure/mysql/flexible-server/how-to-manage-firewall-cli
+    https://learn.microsoft.com/en-us/azure/mysql/flexible-server/how-to-manage-firewall-cli
 
     - Configure private access
 
-    https://docs.microsoft.com/en-us/azure/mysql/flexible-server/how-to-manage-virtual-network-cli
+    https://learn.microsoft.com/en-us/azure/mysql/flexible-server/how-to-manage-virtual-network-cli
 
 examples:
   - name: >
@@ -291,6 +291,14 @@ examples:
           --zone 1 --standby-zone 3 --storage-auto-grow Enabled --iops 500
 """
 
+helps['mysql flexible-server import stop-replication'] = """
+type: command
+short-summary: To stop replication between the source single server and target flexible server.
+examples:
+  - name: Stop replication to 'testFlexServer'.
+    text: az mysql flexible-server import stop-replication -g testGroup -n testFlexServer
+"""
+
 helps['mysql flexible-server show'] = """
 type: command
 short-summary: Get the details of a flexible server.
@@ -315,6 +323,9 @@ examples:
 helps['mysql flexible-server update'] = """
 type: command
 short-summary: Update a flexible server.
+long-summary: |
+    > [!WARNING]
+    > Enabling High-availability may result in a short downtime for the server based on your server configuration.
 examples:
   - name: Update a flexible server's sku, using local context for server and resource group.
     text: az mysql flexible-server update --sku-name Standard_D4ds_v4 --tier GeneralPurpose
@@ -384,6 +395,19 @@ examples:
     text: >
       az mysql flexible-server restore --resource-group testGroup --name testserverNew \\
         --source-server testserver --public-access Enabled
+  - name: >
+      Restore 'testserver' to current point-in-time as a new server 'testserverNew' in a different resource group.
+      Here --resource-group is for the target server's resource group, and --source-server must be passed as resource ID.
+    text: >
+      az mysql flexible-server restore --resource-group testGroup --name testserverNew \\
+        --source-server /subscriptions/{sourceSubscriptionId}/resourceGroups/{sourceResourceGroup}/providers/Microsoft.DBforMySQL/flexibleServers/{sourceServerName}
+  - name: >
+      Restore 'testserver' to current point-in-time as a new server 'testserverNew' in a different subscription.
+      Here --resource-group is for the target server's resource group, and --source-server must be passed as resource ID.
+      This resource ID can be in a subscription different than the subscription used for az account set.
+    text: >
+      az mysql flexible-server restore --resource-group testGroup --name testserverNew \\
+        --source-server /subscriptions/{sourceSubscriptionId}/resourceGroups/{sourceResourceGroup}/providers/Microsoft.DBforMySQL/flexibleServers/{sourceServerName}
 """
 
 helps['mysql flexible-server geo-restore'] = """
@@ -405,6 +429,13 @@ examples:
   - name: Geo-restore private access server 'testserver' as a new server 'testserverNew' with public access.
     text: >
       az mysql flexible-server geo-restore --resource-group testGroup --name testserverNew  --source-server testserver --public-access Enabled --location newLocation
+  - name: >
+      Geo-restore 'testserver' to current point-in-time as a new server 'testserverNew' in a different subscription / resource group.
+      Here --resource-group is for the target server's resource group, and --source-server must be passed as resource ID.
+      This resource ID can be in a subscription different than the subscription used for az account set.
+    text: >
+      az mysql flexible-server geo-restore --resource-group testGroup --name testserverNew --location newLocation \\
+        --source-server /subscriptions/{sourceSubscriptionId}/resourceGroups/{sourceResourceGroup}/providers/Microsoft.DBforMySQL/flexibleServers/{sourceServerName}
 """
 
 helps['mysql flexible-server start'] = """
@@ -434,6 +465,44 @@ examples:
     crafted: true
   - name: Restart a flexible server with failover
     text: az mysql flexible-server restart --resource-group testGroup --name testserver --failover Forced
+"""
+
+helps['mysql flexible-server detach-vnet'] = """
+type: command
+short-summary: Detach vnet for a flexible server.
+examples:
+  - name: Detach vnet for a flexible server with public access disabled.
+    text: az mysql flexible-server detach-vnet --resource-group testGroup --name testserver --public-network-access Disabled
+    crafted: true
+"""
+
+helps['mysql flexible-server maintenance'] = """
+type: group
+short-summary: Manage maintenance on a flexible server.
+"""
+
+helps['mysql flexible-server maintenance reschedule'] = """
+type: command
+short-summary: Reschedule the ongoing planned maintenance of a flexible server.
+examples:
+  - name: reschedule a existing maintenance '_T9Q-TS8' of the server 'testserver' under resource gruop 'testgroup' to a new start time 'UTC 20240601 09:00:00'
+    text: az mysql flexible-server maintenance reschedule --resource-group testgroup --server-name testserver --maintenance-name _T9Q-TS8 --start-time 2024-06-01T09:00:00Z
+"""
+
+helps['mysql flexible-server maintenance list'] = """
+type: command
+short-summary: List all of the maintenances of a flexible server.
+examples:
+  - name: List all of the maintenances of mysql flexible server 'testserver' under resource group 'testgroup'.
+    text: az mysql flexible-server maintenance list --resource-group testgroup --server-name testserver
+"""
+
+helps['mysql flexible-server maintenance show'] = """
+type: command
+short-summary: Get the specific maintenance of a flexible server by maintenance name.
+examples:
+  - name: Get a maintenance of mysql flexible server 'testserver' under resource group 'testgroup', with maintenance name '_T9Q-TS8'
+    text: az mysql flexible-server maintenance show --resource-group testgroup --server-name testserver --maintenance-name _T9Q-TS8
 """
 
 helps['mysql flexible-server wait'] = """
@@ -607,6 +676,13 @@ short-summary: Create a read replica for a server.
 examples:
   - name: Create a read replica 'testReplicaServer' for 'testserver' in the specified zone if available.
     text: az mysql flexible-server replica create --replica-name testReplicaServer -g testGroup --source-server testserver --zone 3
+  - name: >
+      Create a read replica 'testReplicaServer' for 'testserver' in a different subscription / resource group 'newTestGroup'.
+      Here --resource-group is for the read replica's resource group, and --source-server must be passed as resource ID.
+      This resource ID can be in a subscription different than the subscription used for az account set.
+    text: >
+      az mysql flexible-server replica create --replica-name testReplicaServer -g newTestGroup \\
+        --source-server /subscriptions/{sourceSubscriptionId}/resourceGroups/{sourceResourceGroup}/providers/Microsoft.DBforMySQL/flexibleServers/{sourceServerName}
 """
 
 helps['mysql flexible-server replica list'] = """
@@ -734,6 +810,14 @@ short-summary: Create a backup for a given server with specified backup name.
 examples:
   - name: Create a backup for 'testsvr' with backup name 'testbackup'.
     text: az mysql flexible-server backup create -g testgroup -n testsvr --backup-name testbackup
+"""
+
+helps['mysql flexible-server backup delete'] = """
+type: command
+short-summary: Delete a backup for a given server with specified backup name.
+examples:
+  - name: Delete a backup for 'testsvr' with backup name 'testbackup'.
+    text: az mysql flexible-server backup delete -g testgroup -n testsvr --backup-name testbackup
 """
 
 helps['mysql flexible-server identity'] = """

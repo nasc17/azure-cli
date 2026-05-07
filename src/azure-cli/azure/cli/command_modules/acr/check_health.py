@@ -4,6 +4,7 @@
 # --------------------------------------------------------------------------------------------
 
 import re
+import json
 from knack.util import CLIError
 from knack.log import get_logger
 from .custom import get_docker_command
@@ -73,11 +74,11 @@ def _subprocess_communicate(command_parts, shell=False):
 
 
 # Checks for the environment
-# Checks docker command, docker daemon, docker version and docker pull
+# Checks container command, daemon, version and image pull
 def _get_docker_status_and_version(ignore_errors, yes):
     from ._errors import DOCKER_DAEMON_ERROR, DOCKER_PULL_ERROR, DOCKER_VERSION_ERROR
 
-    # Docker command and docker daemon check
+    # Container command and daemon check
     docker_command, error = get_docker_command(is_diagnostics_context=True)
     docker_daemon_available = True
 
@@ -88,18 +89,31 @@ def _get_docker_status_and_version(ignore_errors, yes):
         docker_daemon_available = False
 
     if docker_daemon_available:
-        logger.warning("Docker daemon status: available")
+        logger.warning("%s daemon status: available", docker_command.title())
 
     # Docker version check
-    output, warning, stderr, succeeded = _subprocess_communicate(
-        [docker_command, "version", "--format", "'Docker version {{.Server.Version}}, "
-         "build {{.Server.GitCommit}}, platform {{.Server.Os}}/{{.Server.Arch}}'"])
+    output, warning, stderr, succeeded = _subprocess_communicate([docker_command, "version", "--format", "json"])
     if not succeeded:
         _handle_error(DOCKER_VERSION_ERROR.append_error_message(stderr), ignore_errors)
     else:
         if warning:
             logger.warning(warning)
-        logger.warning("Docker version: %s", output)
+        try:
+            json_output = json.loads(output).get("Client")
+        except json.decoder.JSONDecodeError:
+            json_output = {}
+        version = json_output.get("Version", "unknown")
+        commit = json_output.get("GitCommit", "unknown")[:7]
+        if docker_command == "docker":
+            os = json_output.get("Os", "unknown")
+            arch = json_output.get("Arch", "unknown")
+        else:
+            try:
+                os, arch = json_output.get("OsArch", "unknown").split("/")
+            except ValueError:
+                os = "unknown"
+                arch = "unknown"
+        logger.warning("%s version: %s, build %s, platform %s/%s", docker_command.title(), version, commit, os, arch)
 
     # Docker pull check - only if docker daemon is available
     if docker_daemon_available:
@@ -114,14 +128,14 @@ def _get_docker_status_and_version(ignore_errors, yes):
 
         if not succeeded:
             if stderr and DOCKER_PULL_WRONG_PLATFORM in stderr:
-                print_pass("Docker pull of '{}'".format(IMAGE))
+                print_pass(f"{docker_command.title()} pull of '{IMAGE}'")
                 logger.warning("Image '%s' can be pulled but cannot be used on this platform", IMAGE)
                 return
             _handle_error(DOCKER_PULL_ERROR.append_error_message(stderr), ignore_errors)
         else:
             if warning:
                 logger.warning(warning)
-            print_pass("Docker pull of '{}'".format(IMAGE))
+            print_pass(f"{docker_command.title()} pull of '{IMAGE}'")
 
 
 # Get current CLI version
@@ -234,7 +248,7 @@ def _get_registry_status(login_server, registry_name, ignore_errors):
     try:
         request_url = 'https://' + login_server + '/v2/'
         logger.debug(add_timestamp("Sending a HTTP GET request to {}".format(request_url)))
-        challenge = requests.get(request_url, verify=(not should_disable_connection_verify()))
+        challenge = requests.get(request_url, verify=not should_disable_connection_verify())
     except SSLError:
         from ._errors import CONNECTIVITY_SSL_ERROR
         _handle_error(CONNECTIVITY_SSL_ERROR.format_error_message(login_server), ignore_errors)
@@ -251,14 +265,28 @@ def _get_registry_status(login_server, registry_name, ignore_errors):
     return True
 
 
-def _get_endpoint_and_token_status(cmd, login_server, ignore_errors):
+def _get_endpoint_and_token_status(cmd, login_server, registry_abac_enabled, repository, ignore_errors):
     from ._errors import CONNECTIVITY_CHALLENGE_ERROR, CONNECTIVITY_AAD_LOGIN_ERROR, \
         CONNECTIVITY_REFRESH_TOKEN_ERROR, CONNECTIVITY_ACCESS_TOKEN_ERROR, \
-        CONNECTIVITY_TOOMANYREQUESTS_ERROR
+        CONNECTIVITY_TOOMANYREQUESTS_ERROR, CONNECTIVITY_ACCESS_TOKEN_PERMISSIONS_ERROR
+
+    # Check user's allowed permissions to the repository if the repository name is specified
+    checked_permissions = None
+    if repository:
+        from ._docker_utils import RepoAccessTokenPermission
+        checked_permissions = RepoAccessTokenPermission.PULL_PUSH_META_WRITE_META_READ_DELETE.value
+    verify_user_permissions = repository is not None
 
     # Check access to login endpoint
     url = 'https://' + login_server + '/v2/'
-    result_from_token = _get_aad_token(cmd.cli_ctx, login_server, False, is_diagnostics_context=True)
+    result_from_token = _get_aad_token(
+        cmd.cli_ctx,
+        login_server,
+        False,
+        repository,
+        permission=checked_permissions,
+        is_diagnostics_context=True,
+        verify_user_permissions=verify_user_permissions)
 
     if isinstance(result_from_token, ErrorClass):
         if result_from_token.error_title == CONNECTIVITY_CHALLENGE_ERROR.error_title:
@@ -267,36 +295,46 @@ def _get_endpoint_and_token_status(cmd, login_server, ignore_errors):
 
         print_pass("Challenge endpoint {}".format(url))
 
-        if result_from_token.error_title == CONNECTIVITY_AAD_LOGIN_ERROR.error_title:
-            _handle_error(result_from_token, ignore_errors)
-            return
-
-        if result_from_token.error_title == CONNECTIVITY_REFRESH_TOKEN_ERROR.error_title:
-            _handle_error(result_from_token, ignore_errors)
-            return
-
-        if result_from_token.error_title == CONNECTIVITY_TOOMANYREQUESTS_ERROR.error_title:
+        if result_from_token.error_title in [
+                CONNECTIVITY_AAD_LOGIN_ERROR.error_title,
+                CONNECTIVITY_REFRESH_TOKEN_ERROR.error_title,
+                CONNECTIVITY_TOOMANYREQUESTS_ERROR.error_title]:
             _handle_error(result_from_token, ignore_errors)
             return
 
         print_pass("Fetch refresh token for registry '{}'".format(login_server))
 
-        if result_from_token.error_title == CONNECTIVITY_ACCESS_TOKEN_ERROR.error_title:
+        if result_from_token.error_title in [
+                CONNECTIVITY_ACCESS_TOKEN_ERROR.error_title,
+                CONNECTIVITY_ACCESS_TOKEN_PERMISSIONS_ERROR.error_title]:
             _handle_error(result_from_token, ignore_errors)
             return
 
-        print_pass("Fetch access token for registry '{}'".format(login_server))
+        if repository:
+            print_pass("Fetch access token for repository '{}' in registry '{}'".format(repository, login_server))
+        else:
+            print_pass("Fetch access token for registry '{}'".format(login_server))
+            if registry_abac_enabled:
+                logger.warning(
+                    "Note: Please run the command with the '--repository' flag to check your read and write access "
+                    "to a specific repository.")
 
         return
 
     # If return is not of type ErrorClass, then it is the token
     print_pass("Challenge endpoint {}".format(url))
     print_pass("Fetch refresh token for registry '{}'".format(login_server))
-    print_pass("Fetch access token for registry '{}'".format(login_server))
+    if repository:
+        print_pass("Fetch access token for repository '{}' in registry '{}'".format(repository, login_server))
+    else:
+        print_pass("Fetch access token for registry '{}'".format(login_server))
+        if registry_abac_enabled:
+            logger.warning(
+                "Note: Please run the command with the '--repository' flag to check your read and write access "
+                "to a specific repository.")
 
 
-def _check_registry_health(cmd, registry_name, ignore_errors):
-    from azure.cli.core.profiles import ResourceType
+def _check_registry_health(cmd, registry_name, repository, ignore_errors):
     if registry_name is None:
         logger.warning("Registry name must be provided to check connectivity.")
         return
@@ -319,32 +357,34 @@ def _check_registry_health(cmd, registry_name, ignore_errors):
 
     status_validated = _get_registry_status(login_server, registry_name, ignore_errors)
     if status_validated:
-        _get_endpoint_and_token_status(cmd, login_server, ignore_errors)
+        RoleAssignmentMode = cmd.get_models('RoleAssignmentMode')
+        registry_abac_enabled = \
+            registry and registry.role_assignment_mode == RoleAssignmentMode.ABAC_REPOSITORY_PERMISSIONS
+        _get_endpoint_and_token_status(cmd, login_server, registry_abac_enabled, repository, ignore_errors)
 
-    if cmd.supported_api_version(min_api='2020-11-01-preview', resource_type=ResourceType.MGMT_CONTAINERREGISTRY):  # pylint: disable=too-many-nested-blocks
-        # CMK settings
-        if registry and registry.encryption and registry.encryption.key_vault_properties:  # pylint: disable=too-many-nested-blocks
-            client_id = registry.encryption.key_vault_properties.identity
-            valid_identity = False
-            if registry.identity:
-                valid_identity = ((client_id == 'system') and
-                                  bool(registry.identity.principal_id))  # use system identity?
-                if not valid_identity and registry.identity.user_assigned_identities:
-                    for k, v in registry.identity.user_assigned_identities.items():
-                        if v.client_id == client_id:
-                            from msrestazure.azure_exceptions import CloudError
-                            try:
-                                valid_identity = (resolve_identity_client_id(cmd.cli_ctx, k) == client_id)
-                            except CloudError:
-                                pass
-            if not valid_identity:
-                from ._errors import CMK_MANAGED_IDENTITY_ERROR
-                _handle_error(CMK_MANAGED_IDENTITY_ERROR.format_error_message(registry_name), ignore_errors)
+    # CMK settings
+    if registry and registry.encryption and registry.encryption.key_vault_properties:  # pylint: disable=too-many-nested-blocks
+        client_id = registry.encryption.key_vault_properties.identity
+        valid_identity = False
+        if registry.identity:
+            valid_identity = ((client_id == 'system') and
+                              bool(registry.identity.principal_id))  # use system identity?
+            if not valid_identity and registry.identity.user_assigned_identities:
+                for k, v in registry.identity.user_assigned_identities.items():
+                    if v.client_id == client_id:
+                        from azure.core.exceptions import HttpResponseError
+                        try:
+                            valid_identity = resolve_identity_client_id(cmd.cli_ctx, k) == client_id
+                        except HttpResponseError:
+                            pass
+        if not valid_identity:
+            from ._errors import CMK_MANAGED_IDENTITY_ERROR
+            _handle_error(CMK_MANAGED_IDENTITY_ERROR.format_error_message(registry_name), ignore_errors)
 
 
 def _check_private_endpoint(cmd, registry_name, vnet_of_private_endpoint):  # pylint: disable=too-many-locals, too-many-statements
     import socket
-    from msrestazure.tools import parse_resource_id, is_valid_resource_id, resource_id
+    from azure.mgmt.core.tools import parse_resource_id, is_valid_resource_id, resource_id
 
     if registry_name is None:
         raise CLIError("Registry name must be provided to verify DNS routings of its private endpoints")
@@ -402,15 +442,15 @@ def _check_private_endpoint(cmd, registry_name, vnet_of_private_endpoint):  # py
                ' Please make sure you provided correct vnet')
         raise CLIError(err.format(registry_name, vnet_of_private_endpoint))
 
-    for fqdn in dns_mappings:
+    for k, v in dns_mappings.items():
         try:
-            result = socket.gethostbyname(fqdn)
-            if result != dns_mappings[fqdn]:
+            result = socket.gethostbyname(k)
+            if result != v:
                 err = 'DNS routing to registry "%s" through private IP is incorrect. Expect: %s, Actual: %s'
-                logger.warning(err, registry_name, dns_mappings[fqdn], result)
+                logger.warning(err, registry_name, v, result)
                 dns_ok = False
         except Exception as e:  # pylint: disable=broad-except
-            logger.warning('Error resolving DNS for %s. Ex: %s', fqdn, e)
+            logger.warning('Error resolving DNS for %s. Ex: %s', k, e)
             dns_ok = False
 
     if dns_ok:
@@ -422,6 +462,7 @@ def _check_private_endpoint(cmd, registry_name, vnet_of_private_endpoint):  # py
 # General command
 def acr_check_health(cmd,  # pylint: disable useless-return
                      vnet=None,
+                     repository=None,
                      ignore_errors=False,
                      yes=False,
                      registry_name=None):
@@ -433,7 +474,7 @@ def acr_check_health(cmd,  # pylint: disable useless-return
         _get_docker_status_and_version(ignore_errors, yes)
         _get_cli_version()
 
-    _check_registry_health(cmd, registry_name, ignore_errors)
+    _check_registry_health(cmd, registry_name, repository, ignore_errors)
 
     if vnet:
         _check_private_endpoint(cmd, registry_name, vnet)
